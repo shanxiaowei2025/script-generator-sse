@@ -7,7 +7,7 @@ from app.utils.text_utils import extract_title_and_directory
 from app.utils.storage import save_partial_content
 from typing import Optional, Callable, Awaitable
 
-async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, API_URL, client_id=None, content_callback: Optional[Callable[[str], Awaitable[bool]]] = None):
+async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, API_URL, client_id=None, content_callback=None):
     """生成单集内容"""
     print(f"\n==== 生成第{ep}集剧本 ====")
     
@@ -183,23 +183,6 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
     请确保生成完整的剧本。
     """
     
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}",
-        "anthropic-version": API_VERSION
-    }
-    
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": EPISODE_TOKEN_LIMIT,
-        "temperature": 0.7,
-        "stream": True
-    }
-    
-    print(f"请求第{ep}集内容，模型: {payload['model']}")
-    episode_content = ""
-    
     try:
         max_retries = 3
         retry_count = 0
@@ -207,96 +190,92 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
         while retry_count < max_retries:
             try:
                 print(f"第{ep}集 - 尝试 {retry_count+1}/{max_retries}")
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                    async with client.stream("POST", API_URL, json=payload, headers=headers) as response:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    # 创建请求但不等待整个响应完成
+                    print(f"开始发送API请求到: {API_URL}")
+                    async with client.stream(
+                        "POST", 
+                        API_URL,
+                        headers={"Authorization": f"Bearer {API_KEY}"},
+                        json={
+                            "model": "claude-3-7-sonnet-20250219",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.7,
+                            "max_tokens": EPISODE_TOKEN_LIMIT,
+                            "stream": True
+                        },
+                        timeout=120.0
+                    ) as response:
+                        # 检查响应状态
+                        print(f"收到API响应，状态码: {response.status_code}")
                         if response.status_code != 200:
-                            print(f"第{ep}集生成失败: HTTP {response.status_code}")
-                            retry_count += 1
-                            if retry_count >= max_retries:
-                                return f"第{ep}集生成失败，API响应错误: {response.status_code}"
-                            await asyncio.sleep(2)  # 等待2秒后重试
-                            continue
+                            print(f"API错误响应: {response.status_code}")
+                            error_text = await response.text()
+                            print(f"错误详情: {error_text}")
+                            raise Exception(f"API请求失败，状态码: {response.status_code}")
                         
-                        print(f"开始接收第{ep}集内容流...")
-                        async for line in response.aiter_lines():
-                            if not line or not line.startswith("data: "):
-                                continue
-                            
-                            try:
-                                line = line.replace("data: ", "")
-                                if line == "[DONE]":
-                                    break
-                                
-                                chunk_data = json.loads(line)
-                                delta = ""
-                                
-                                if "type" in chunk_data and chunk_data.get("type") == "content_block_delta":
-                                    delta = chunk_data.get("delta", {}).get("text", "")
-                                elif "choices" in chunk_data and chunk_data["choices"]:
-                                    delta = chunk_data["choices"][0].get("delta", {}).get("content", "")
-                                
-                                if delta:
-                                    episode_content += delta
-                                    
-                                    # 使用缓冲区积累一定内容后再发送
-                                    buffer_size = len(delta)
-                                    buffer_content = delta
-                                    send_buffer = False
-                                    
-                                    # 在以下情况发送缓冲区内容:
-                                    # 1. 内容包含换行符
-                                    # 2. 积累了足够多的字符(10个以上)
-                                    if "\n" in buffer_content or buffer_size >= 10:
-                                        send_buffer = True
-                                    
-                                    # 如果提供了client_id，实时保存部分内容
-                                    # 但减少保存频率，每500个字符保存一次
-                                    if client_id and len(episode_content) % 500 < buffer_size:
-                                        save_partial_content(client_id, ep, episode_content)
-                                    
-                                    # 如果提供了回调函数，发送实时内容
-                                    if content_callback and send_buffer:
-                                        # 修改：检查回调函数返回值，如果返回False表示连接已断开
-                                        callback_success = await content_callback(buffer_content)
-                                        if callback_success is False:  # 显式检查False
-                                            print(f"连接已断开，中止第{ep}集生成")
-                                            return episode_content
-                            except json.JSONDecodeError:
-                                print(f"JSON解析错误，跳过此行: {line[:50]}...")
-                                continue
-                            except Exception as e:
-                                print(f"处理第{ep}集响应时出错: {str(e)}")
-                                # 修改：如果错误包含连接断开相关信息，立即终止
-                                if "连接已断开" in str(e) or "close message" in str(e):
-                                    print(f"检测到连接断开错误，中止第{ep}集生成")
-                                    return episode_content
-                                continue
+                        # 处理流式响应
+                        episode_content = ""
+                        chunk_count = 0
                         
-                        # 成功获取完整内容
-                        if episode_content:
-                            print(f"第{ep}集成功获取流式内容，长度: {len(episode_content)} 字符")
-                            break
-                        else:
-                            print(f"第{ep}集内容为空，重试")
-                            retry_count += 1
-            except Exception as e:
-                print(f"第{ep}集生成请求出错 (尝试 {retry_count+1}/{max_retries}): {str(e)}")
-                # 修改：如果错误包含连接断开相关信息，立即终止不再重试
-                if "连接已断开" in str(e) or "close message" in str(e):
-                    print(f"检测到连接断开错误，不再重试")
-                    return episode_content
-                
+                        async for chunk in response.aiter_bytes():
+                            if chunk:
+                                try:
+                                    # 解码为文本
+                                    text_chunk = chunk.decode('utf-8')
+                                    # 处理每行数据
+                                    for line in text_chunk.split('\n'):
+                                        if line.startswith('data: '):
+                                            if line.strip() == 'data: [DONE]':
+                                                print("收到[DONE]标记，流式响应完成")
+                                                break
+                                            
+                                            try:
+                                                data = json.loads(line[6:])
+                                                delta = ""
+                                                
+                                                # 提取文本增量
+                                                if "choices" in data and data["choices"]:
+                                                    delta = data["choices"][0].get("delta", {}).get("content", "")
+                                                elif "type" in data and data.get("type") == "content_block_delta":
+                                                    delta = data.get("delta", {}).get("text", "")
+                                                
+                                                if delta:
+                                                    # 重要：同时累积内容
+                                                    episode_content += delta
+                                                    chunk_count += 1
+                                                    
+                                                    if chunk_count % 10 == 0:
+                                                        print(f"已接收{chunk_count}个文本块，当前内容长度: {len(episode_content)}")
+                                                    
+                                                    if content_callback:
+                                                        await content_callback(delta)
+                                            except json.JSONDecodeError as je:
+                                                print(f"JSON解析错误: {str(je)}, 行内容: {line[:50]}...")
+                                except Exception as e:
+                                    print(f"处理流式数据块出错: {str(e)}")
+                        
+                        print(f"第{ep}集内容生成完成，总长度: {len(episode_content)} 字符")
+                        return episode_content
+                        
+            except httpx.TimeoutException as e:
+                print(f"API请求超时: {str(e)}")
                 retry_count += 1
                 if retry_count >= max_retries:
-                    return f"第{ep}集生成出错: {str(e)}"
-                # 修改：增加重试间隔时间
-                await asyncio.sleep(5 * retry_count)  # 逐渐增加等待时间
-                
-        if not episode_content:
-            episode_content = f"第{ep}集生成失败，但将继续生成后续内容。"
+                    if content_callback:
+                        await content_callback("\n\n[生成超时，请刷新重试]")
+                    return "生成超时，请刷新重试"
+                await asyncio.sleep(2)
+            except Exception as e:
+                print(f"第{ep}集生成请求出错: {str(e)}")
+                retry_count += 1
+                if retry_count >= max_retries:
+                    if content_callback:
+                        await content_callback(f"\n\n[生成失败: {str(e)}]")
+                    return f"生成失败: {str(e)}"
+                await asyncio.sleep(2)
     except Exception as e:
-        print(f"第{ep}集生成出错: {str(e)}")
-        episode_content = f"第{ep}集生成出错: {str(e)}"
-    
-    print(f"第{ep}集生成完成，长度: {len(episode_content)} 字符")
-    return episode_content 
+        print(f"第{ep}集生成过程中发生严重错误: {str(e)}")
+        if content_callback:
+            await content_callback(f"\n\n[系统错误: {str(e)}]")
+        return f"系统错误: {str(e)}" 

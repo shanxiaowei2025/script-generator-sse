@@ -7,7 +7,7 @@ load_dotenv()
 
 # API设置
 API_KEY = os.getenv("API_KEY", "")
-API_URL = os.getenv("API_URL", "https://api.anthropic.com/v1/messages")
+API_URL = os.getenv("API_URL", "https://vip.apiyi.com/v1/chat/completions")
 API_VERSION = os.getenv("API_VERSION", "2023-06-01")
 
 # 应用设置
@@ -29,8 +29,20 @@ os.makedirs(PARTIAL_CONTENTS_DIR, exist_ok=True)
 
 # 令牌限制
 DIRECTORY_TOKEN_LIMIT = 5000 # 目录生成限制
-EPISODE_TOKEN_LIMIT = 20000 # 单集生成限制
+EPISODE_TOKEN_LIMIT = 30000 # 单集生成限制
 RESUME_TOKEN_LIMIT = 20000 # 续写生成限制
 
 # 请求超时(秒)
-REQUEST_TIMEOUT = 600 
+REQUEST_TIMEOUT = 600
+
+# RunningHub API 设置
+# 创建任务API
+RUNNINGHUB_CREATE_API_URL = os.getenv("RUNNINGHUB_CREATE_API_URL", "https://www.runninghub.cn/task/openapi/create")
+# 查询任务状态API
+RUNNINGHUB_STATUS_API_URL = os.getenv("RUNNINGHUB_STATUS_API_URL", "https://www.runninghub.cn/task/openapi/status")
+# 查询任务结果API
+RUNNINGHUB_RESULT_API_URL = os.getenv("RUNNINGHUB_RESULT_API_URL", "https://www.runninghub.cn/task/openapi/outputs")
+# API密钥和工作流配置
+RUNNINGHUB_API_KEY = os.getenv("RUNNINGHUB_API_KEY", "d9ce3b3ace1242f5824396f69c33f0f3") # 默认值需要替换为实际的API Key
+RUNNINGHUB_WORKFLOW_ID = os.getenv("RUNNINGHUB_WORKFLOW_ID", "1917109902920323073")
+RUNNINGHUB_NODE_ID = os.getenv("RUNNINGHUB_NODE_ID", "147")

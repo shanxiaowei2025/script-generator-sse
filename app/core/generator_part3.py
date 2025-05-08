@@ -145,7 +145,7 @@ async def resume_episode_generation(ep, genre, episodes, duration, full_script, 
         while retry_count < max_retries:
             try:
                 print(f"继续生成第{ep}集 - 尝试 {retry_count+1}/{max_retries}")
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                async with httpx.AsyncClient(timeout=None) as client:
                     async with client.stream("POST", API_URL, json=payload, headers=headers) as response:
                         if response.status_code != 200:
                             print(f"继续生成第{ep}集失败: HTTP {response.status_code}")

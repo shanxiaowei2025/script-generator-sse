@@ -25,6 +25,36 @@ document.addEventListener('DOMContentLoaded', function() {
     let generationAborted = false;
     let episodesContent = {};  // 存储已生成的各集内容
     
+    let output = document.getElementById('output');
+    let buffer = "";
+    let typingSpeed = 10; // 毫秒/字符
+    let typingInProgress = false;
+    let typingQueue = [];
+    
+    // 打字机效果函数
+    function typeWriter(text, callback) {
+        let i = 0;
+        typingInProgress = true;
+        
+        function type() {
+            if (i < text.length) {
+                output.innerHTML += text.charAt(i);
+                i++;
+                setTimeout(type, typingSpeed);
+            } else {
+                typingInProgress = false;
+                if (callback) callback();
+                // 如果队列中有内容，继续处理
+                if (typingQueue.length > 0) {
+                    let nextText = typingQueue.shift();
+                    typeWriter(nextText, null);
+                }
+            }
+        }
+        
+        type();
+    }
+    
     // 表单提交处理
     scriptForm.addEventListener('submit', async function(event) {
         event.preventDefault();
@@ -233,9 +263,27 @@ document.addEventListener('DOMContentLoaded', function() {
                 displayInitialContent(data.content);
                 break;
                 
+            case 'content_chunk':
+                // 使用打字机效果显示内容
+                typingQueue.push(data.content);
+                
+                if (!typingInProgress) {
+                    let text = typingQueue.shift();
+                    typeWriter(text, null);
+                }
+                break;
+                
             case 'episode_content_chunk':
                 // 处理流式内容片段
                 handleEpisodeChunk(data.episode, data.content, data.is_complete);
+                
+                // 同时使用打字机效果
+                typingQueue.push(data.content);
+                
+                if (!typingInProgress) {
+                    let text = typingQueue.shift();
+                    typeWriter(text, null);
+                }
                 break;
                 
             case 'episode_content':

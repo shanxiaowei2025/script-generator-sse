@@ -10,7 +10,16 @@ from app.utils.storage import save_partial_content
 from app.core.generator_part2 import generate_episode
 from app.core.generator_part3 import resume_episode_generation
 
-async def generate_character_and_directory(genre, episodes, duration, characters, api_key, api_url):
+async def generate_character_and_directory(
+    genre, 
+    episodes, 
+    duration, 
+    characters, 
+    API_KEY, 
+    API_URL,
+    client_id=None,
+    content_callback=None  # 添加回调函数参数
+):
     """生成角色表和目录
     
     注意：此函数不需要实现流式传输，因为初始内容（角色表和目录）是一次性发送给前端的。
@@ -75,7 +84,7 @@ async def generate_character_and_directory(genre, episodes, duration, characters
     
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {API_KEY}",
         "anthropic-version": API_VERSION
     }
     
@@ -97,50 +106,58 @@ async def generate_character_and_directory(genre, episodes, duration, characters
         while retry_count < max_retries:
             try:
                 print(f"角色表和目录 - 尝试 {retry_count+1}/{max_retries}")
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                    async with client.stream("POST", api_url, json=payload, headers=headers) as response:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    # 创建请求但不等待整个响应完成
+                    async with client.stream(
+                        "POST", 
+                        API_URL,
+                        headers={"Authorization": f"Bearer {API_KEY}"},
+                        json={
+                            "model": "claude-3-7-sonnet-20250219",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.7,
+                            "stream": True
+                        },
+                        timeout=120.0
+                    ) as response:
+                        # 检查响应状态
                         if response.status_code != 200:
-                            print(f"角色表和目录生成失败: HTTP {response.status_code}")
-                            retry_count += 1
-                            if retry_count >= max_retries:
-                                return f"角色表和目录生成失败，API响应错误: {response.status_code}"
-                            await asyncio.sleep(2)  # 等待2秒后重试
-                            continue
+                            print(f"API错误响应: {response.status_code}")
+                            error_text = await response.text()
+                            print(f"错误详情: {error_text}")
+                            raise Exception(f"API请求失败，状态码: {response.status_code}")
                         
-                        print(f"开始接收角色表和目录内容流...")
-                        async for line in response.aiter_lines():
-                            if not line or not line.startswith("data: "):
-                                continue
-                            
-                            try:
-                                line = line.replace("data: ", "")
-                                if line == "[DONE]":
-                                    break
-                                
-                                chunk_data = json.loads(line)
-                                delta = ""
-                                
-                                if "type" in chunk_data and chunk_data.get("type") == "content_block_delta":
-                                    delta = chunk_data.get("delta", {}).get("text", "")
-                                elif "choices" in chunk_data and chunk_data["choices"]:
-                                    delta = chunk_data["choices"][0].get("delta", {}).get("content", "")
-                                
-                                if delta:
-                                    initial_content += delta
-                            except json.JSONDecodeError:
-                                print(f"JSON解析错误，跳过此行: {line[:50]}...")
-                                continue
-                            except Exception as e:
-                                print(f"处理角色表和目录响应时出错: {str(e)}")
-                                continue
+                        # 一定要使用这种方式处理流式响应
+                        async for chunk in response.aiter_bytes():
+                            if chunk:
+                                try:
+                                    # 解码为文本
+                                    text_chunk = chunk.decode('utf-8')
+                                    # 处理每行数据
+                                    for line in text_chunk.split('\n'):
+                                        if line.startswith('data: '):
+                                            if line.strip() == 'data: [DONE]':
+                                                break
+                                            
+                                            data = json.loads(line[6:])
+                                            delta = ""
+                                            
+                                            # 提取文本增量
+                                            if "choices" in data and data["choices"]:
+                                                delta = data["choices"][0].get("delta", {}).get("content", "")
+                                            
+                                            if delta:
+                                                # 重要：同时累积内容
+                                                initial_content += delta
+                                                
+                                                if content_callback:
+                                                    await content_callback(delta)
+                                except Exception as e:
+                                    print(f"处理流式数据出错: {str(e)}")
                         
-                        # 成功获取完整内容
-                        if initial_content:
-                            print(f"角色表和目录 成功获取流式内容，长度: {len(initial_content)} 字符")
-                            break
-                        else:
-                            print(f"角色表和目录 流式内容为空，重试")
-                            retry_count += 1
+                        # 返回累积的内容
+                        print(f"角色表和目录生成完成，累积内容长度: {len(initial_content)}")
+                        return initial_content
             except Exception as e:
                 print(f"角色表和目录生成请求出错 (尝试 {retry_count+1}/{max_retries}): {str(e)}")
                 retry_count += 1

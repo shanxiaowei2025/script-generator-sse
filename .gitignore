@@ -20,8 +20,14 @@ var/
 .installed.cfg
 *.egg
 
+# 应用存储目录
 app/storage/generation_states/
 app/storage/partial_contents/
+
+# 临时文件
+*.pkl
+*.log
+tmp/
 
 # 虚拟环境
 venv/
@@ -30,6 +36,7 @@ env/
 
 # 环境变量文件
 .env
+.env.*
 
 # IDE
 .idea/
@@ -39,4 +46,4 @@ env/
 
 # 操作系统
 .DS_Store
-Thumbs.db 
+Thumbs.db

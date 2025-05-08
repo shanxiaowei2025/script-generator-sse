@@ -20,7 +20,8 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app = FastAPI(
     title="剧本生成器 API",
     description="基于HTTP流式响应(SSE)的剧本生成服务",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_extra={"x-server-timeout": 300}  # 5分钟超时
 )
 
 # 添加CORS中间件
