@@ -20,11 +20,6 @@ async def generate_character_and_directory(
     client_id=None,
     content_callback=None  # 添加回调函数参数
 ):
-    """生成角色表和目录
-    
-    注意：此函数不需要实现流式传输，因为初始内容（角色表和目录）是一次性发送给前端的。
-    流式传输主要用于每集内容生成，以提供更好的实时反馈。
-    """
     print(f"\n==== 生成角色表和目录 ====")
     
     prompt = f"""

@@ -182,6 +182,9 @@ async def stream_generate_script(request: StreamScriptGenerationRequest):
                                     initial_content += "\n\n" + episode_content
                                     save_generation_state(task_id, current_episode, initial_content)
                                     
+                                    # 保存单集内容
+                                    save_partial_content(task_id, current_episode, episode_content)
+                                    
                                     # 增加集数
                                     current_episode += 1
                                     
