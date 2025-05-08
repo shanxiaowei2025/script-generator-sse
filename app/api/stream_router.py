@@ -359,13 +359,22 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
             script_text = state.get("full_script", "")
             prompts_dict = extract_prompts(script_text)
             
+            # 打印详细提取信息
+            print(f"提取到的画面描述词详情:")
+            for episode, scenes in prompts_dict.items():
+                scene_count = len(scenes)
+                prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
+                print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+            
             # 如果指定了特定集数，只处理该集的内容
             if request.episode is not None:
                 specific_episode = request.episode
                 if specific_episode in prompts_dict:
                     single_episode_dict = {specific_episode: prompts_dict[specific_episode]}
                     prompts_dict = single_episode_dict
+                    print(f"只处理第{specific_episode}集的画面描述词")
                 else:
+                    print(f"错误: 未找到第{specific_episode}集的画面描述词")
                     yield format_sse_event("error", {"message": f"未找到第{specific_episode}集的画面描述词"})
                     return
             
@@ -385,9 +394,22 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
             async def status_callback(status_info):
                 """接收状态更新并通过SSE发送到客户端"""
                 message = status_info.get("message", "处理中...")
+                
+                # 添加详细的任务处理信息
+                active_tasks = status_info.get("active_tasks", [])
+                active_tasks_detail = []
+                
+                if active_tasks:
+                    print(f"正在处理的任务:")
+                    for task in active_tasks:
+                        task_info = f"第{task.get('episode', '?')}集 场景{task.get('scene', '?')} 提示词{task.get('prompt_index', '?')}"
+                        print(f"  - {task_info}")
+                        active_tasks_detail.append(task_info)
+                
                 yield_event = format_sse_event("queue_status", {
                     "message": message,
-                    "active_tasks": status_info.get("active_tasks", 0),
+                    "active_tasks_count": len(active_tasks),
+                    "active_tasks_detail": active_tasks_detail,
                     "completed": status_info.get("completed", 0),
                     "total": status_info.get("total", 0),
                     "queue_size": status_info.get("queue_size", 0)
@@ -409,6 +431,7 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
                 status_events.append(event)
             
             # 调用处理函数
+            print("开始调用RunningHub API处理画面描述词...")
             results = await process_scene_prompts(prompts_dict, status_callback=collect_status_events)
             
             # 发送收集的状态事件（每5个事件发送一次，避免事件过多）
@@ -422,12 +445,28 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
             processing_time = end_time - start_time
             
             # 发送处理完成信息
+            print(f"所有提示词处理完成！共耗时{processing_time:.2f}秒")
             yield format_sse_event("status", {
                 "message": f"所有提示词处理完成！共耗时{processing_time:.2f}秒"
             })
             
+            # 打印处理结果统计
+            success_count = 0
+            error_count = 0
+            
+            for episode, episode_results in results.items():
+                for scene, scene_results in episode_results.items():
+                    for prompt_index, result in scene_results.items():
+                        if "error" in result:
+                            error_count += 1
+                        else:
+                            success_count += 1
+            
+            print(f"处理结果统计: 成功={success_count}, 失败={error_count}")
+            
             # 对于每个集数，分别发送事件
             for episode, episode_results in results.items():
+                print(f"发送第{episode}集的处理结果")
                 yield format_sse_event("runninghub_results", {
                     "episode": episode,
                     "results": episode_results

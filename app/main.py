@@ -27,10 +27,25 @@ app = FastAPI(
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有来源，生产环境应限制
+    # 允许的源列表，也可以使用["*"]允许所有源
+    allow_origins=[
+        "http://localhost:3000",  # 前端开发服务器
+        "http://localhost:8000",  # 可能的其他前端
+        "http://localhost:8003",  # 你当前使用的端口
+        "http://127.0.0.1:8003",
+        "https://yourdomain.com",  # 生产环境域名
+        "*"  # 允许所有源（开发环境可用，生产环境谨慎使用）
+    ],
+    # 允许的请求方法
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    # 允许的请求头
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"],
+    # 允许携带凭证(cookies等)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # 允许暴露的响应头
+    expose_headers=["Content-Disposition", "X-Suggested-Filename"],
+    # CORS预检请求的缓存时间（秒）
+    max_age=600,
 )
 
 # 挂载静态文件目录
