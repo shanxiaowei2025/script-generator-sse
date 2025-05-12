@@ -70,7 +70,7 @@ RUNNINGHUB_NODE_ID=your_node_id
 4. 运行服务
 
 ```bash
-uvicorn app.main:app --host=0.0.0.0 --port=8000 --reload
+uvicorn app.main:app --host=0.0.0.0 --port=8003 --reload
 
 # 或
 python -m app.main

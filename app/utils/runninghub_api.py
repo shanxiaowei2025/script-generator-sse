@@ -15,9 +15,9 @@ from app.core.config import (
 # 任务处理的最大并发数
 MAX_CONCURRENT_TASKS = 3
 # 任务状态检查之间的等待时间（秒）
-TASK_STATUS_CHECK_INTERVAL = 10
+TASK_STATUS_CHECK_INTERVAL = 15
 # 最大等待次数
-MAX_STATUS_CHECK_ATTEMPTS = 20
+MAX_STATUS_CHECK_ATTEMPTS = 1000
 # 完成或失败的任务状态
 FINISHED_TASK_STATUSES = ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED", "FAILED", "ERROR"]
 
@@ -135,42 +135,72 @@ async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Di
     final_status = None
     result = None
     
+    print(f"开始等待任务完成: {task_id}")
+    
     # 检查任务状态，直到完成或失败
     for attempt in range(MAX_STATUS_CHECK_ATTEMPTS):
         # 等待一段时间
         await asyncio.sleep(TASK_STATUS_CHECK_INTERVAL)
         
-        # 查询任务状态
-        status_result = await query_task_status(task_id)
+        # 初始化task_status_str变量，防止未定义错误
+        task_status_str = "UNKNOWN"
         
-        # 如果提供了回调函数，通知状态更新
-        if callback:
-            await callback({
-                "task_id": task_id, 
-                "attempt": attempt + 1, 
-                "status_result": status_result
-            })
-        
-        # 检查任务是否完成
-        if status_result.get("code") == 0:
-            task_status = status_result.get("data", "")
-            if isinstance(task_status, str):
-                task_status_str = task_status
-            else:
-                task_status_str = task_status.get("taskStatus", "")
+        try:
+            # 查询任务状态
+            print(f"查询任务状态: {task_id}, 尝试: {attempt+1}/{MAX_STATUS_CHECK_ATTEMPTS}")
+            status_result = await query_task_status(task_id)
+            print(f"状态查询响应: {status_result}")
             
-            # 如果任务已完成或失败，尝试获取结果并退出循环
-            if task_status_str in FINISHED_TASK_STATUSES:
-                final_status = task_status_str
-                if task_status_str not in ["FAILED", "ERROR"]:
-                    # 查询结果
-                    result = await query_task_result(task_id)
-                break
+            # 如果提供了回调函数，通知状态更新
+            if callback:
+                await callback({
+                    "task_id": task_id, 
+                    "attempt": attempt + 1, 
+                    "status_result": status_result
+                })
+            
+            # 检查任务是否完成
+            if isinstance(status_result, dict) and status_result.get("code") == 0:
+                task_status = status_result.get("data", {})
+                
+                # 处理不同的API响应格式
+                if isinstance(task_status, str):
+                    task_status_str = task_status
+                    print(f"任务状态(字符串格式): {task_status_str}")
+                elif isinstance(task_status, dict):
+                    task_status_str = task_status.get("taskStatus", "UNKNOWN")
+                    print(f"任务状态(字典格式): {task_status_str}")
+                else:
+                    print(f"未知的任务状态格式: {type(task_status)}, 值: {task_status}")
+                
+                # 如果任务已完成或失败，尝试获取结果并退出循环
+                if task_status_str in FINISHED_TASK_STATUSES:
+                    final_status = task_status_str
+                    print(f"任务状态已完成或失败: {final_status}")
+                    
+                    if task_status_str not in ["FAILED", "ERROR"]:
+                        # 查询结果
+                        print(f"查询任务结果: {task_id}")
+                        result_response = await query_task_result(task_id)
+                        print(f"结果查询响应: {result_response}")
+                        result = result_response
+                    break
+            else:
+                print(f"API响应无效或错误: {status_result}")
+                
+        except Exception as e:
+            print(f"查询任务状态时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+        
+        print(f"查询任务状态: {task_id}, 尝试: {attempt+1}, 状态: {task_status_str}")
     
     # 如果没有获取到最终状态，标记为超时
     if final_status is None:
         final_status = "TIMEOUT"
+        print(f"任务超时: {task_id}")
     
+    print(f"任务完成: {task_id}, 最终状态: {final_status}")
     return final_status, result
 
 async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], status_callback=None) -> Dict[str, Any]:
@@ -184,255 +214,222 @@ async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], s
     Returns:
         Dict[str, Any]: 处理结果字典，包含各场景的API调用结果
     """
-    # 最终结果
     results = {}
     
-    # 收集所有提示词，形成待处理队列
-    prompt_queue = deque()
+    # 保存原始提示词字典，用于格式化结果
+    original_prompts_dict = {}
+    
+    # 任务队列和状态管理
+    task_queue = asyncio.Queue()
+    active_tasks = []
+    completed_tasks = 0
+    total_tasks = 0
+    
+    # 统计任务总数并格式化结果结构
     for episode, scenes in prompts_dict.items():
+        # 先将episode转为字符串
+        episode_str = str(episode)
+        # 检查是否已经包含"第"和"集"
+        if episode_str.startswith("第") and episode_str.endswith("集"):
+            episode_key = episode_str  # 已经是正确格式
+        elif episode_str.isdigit() or episode_str.replace(".", "").isdigit():
+            # 纯数字，添加前缀和后缀
+            episode_key = f"{episode_str}"
+        else:
+            # 其他情况，保持不变
+            episode_key = episode_str
+        
+        results[episode_key] = {}
+        original_prompts_dict[episode_key] = {}
+        
         for scene, prompts in scenes.items():
-            for prompt in prompts:
-                # 去除提示词中的#号和空格
+            # 格式化场景键为"场次X-X"
+            scene_key = f"场次{scene}" if not str(scene).startswith("场次") else str(scene)
+            results[episode_key][scene_key] = {}
+            original_prompts_dict[episode_key][scene_key] = {}
+            
+            # 添加有效提示词到队列
+            for idx, prompt in enumerate(prompts):
                 clean_prompt = prompt.replace('#', '').strip()
                 if clean_prompt:
-                    # 将提示词和位置信息加入队列
-                    prompt_queue.append((int(episode), scene, clean_prompt))
-    
-    # 当前活跃任务 {task_id: (episode, scene, prompt, result_obj)}
-    active_tasks = {}
-    # 已完成任务数量
-    completed_tasks = 0
-    # 总任务数量
-    total_tasks = len(prompt_queue)
+                    # 保存原始提示词，用于后续格式化
+                    original_prompts_dict[episode_key][scene_key][idx] = clean_prompt
+                    
+                    total_tasks += 1
+                    await task_queue.put({
+                        "episode": episode,
+                        "episode_key": episode_key,
+                        "scene": scene,
+                        "scene_key": scene_key,
+                        "prompt_index": idx,
+                        "prompt": clean_prompt
+                    })
     
     # 状态回调
     async def update_status(message):
         if status_callback:
             await status_callback({
                 "message": message,
-                "active_tasks": len(active_tasks),
+                "active_tasks": active_tasks.copy(),  # 复制列表，避免异步修改问题
                 "completed": completed_tasks,
                 "total": total_tasks,
-                "queue_size": len(prompt_queue)
+                "queue_size": task_queue.qsize()
             })
     
-    # 启动初始任务（最多MAX_CONCURRENT_TASKS个）
-    while prompt_queue and len(active_tasks) < MAX_CONCURRENT_TASKS:
-        episode, scene, prompt = prompt_queue.popleft()
-        
-        # 创建任务
-        await update_status(f"创建任务中: {episode}-{scene} '{prompt[:30]}...'")
-        create_result = await call_runninghub_workflow(prompt)
-        
-        # 结果对象
-        result_obj = {
-            "prompt": prompt,
-            "create_result": create_result,
-            "task_id": None,
-            "status_result": None,
-            "final_result": None,
-            "status": None
-        }
-        
-        # 检查是否创建成功
-        task_id = None
-        if create_result.get("code") == 0:
-            task_id = create_result.get("data", {}).get("taskId")
-            if task_id is None and "data" in create_result and "taskId" in create_result["data"]:
-                task_id = create_result["data"]["taskId"]
+    # 处理任务函数
+    async def process_task(task):
+        try:
+            print(f"开始处理任务: {task['episode_key']}, 场次{task['scene_key']}, 提示词{task['prompt_index']}")
             
-            result_obj["task_id"] = task_id
+            episode = task.get("episode")
+            episode_key = task.get("episode_key") 
+            scene = task.get("scene")
+            scene_key = task.get("scene_key")
+            prompt_index = task.get("prompt_index")
+            prompt = task.get("prompt")
             
-            if task_id:
-                # 加入活跃任务
-                active_tasks[task_id] = (episode, scene, prompt, result_obj)
-                await update_status(f"任务已创建: {task_id} (活跃任务: {len(active_tasks)})")
-            else:
-                # 创建失败但返回成功，添加到结果
-                ensure_result_path(results, episode, scene, result_obj)
-                completed_tasks += 1
-        else:
-            # 创建失败，可能是队列已满，重新放回队列末尾
-            if create_result.get("code") == 421:  # TASK_QUEUE_MAXED
-                # 任务队列已满，将任务重新放入队列末尾
-                prompt_queue.append((episode, scene, prompt))
-                await update_status("RunningHub队列已满，任务重新排队")
-                # 等待一段时间再尝试
-                await asyncio.sleep(5)
-            else:
-                # 其他错误，记录并标记为完成
-                result_obj["status"] = "CREATE_FAILED"
-                ensure_result_path(results, episode, scene, result_obj)
-                completed_tasks += 1
-                await update_status(f"任务创建失败: {create_result.get('msg', 'unknown error')}")
-    
-    # 主处理循环
-    while active_tasks or prompt_queue:
-        # 等待任何任务完成
-        if active_tasks:
-            # 创建任务完成监控
-            monitoring_tasks = []
-            for task_id, (episode, scene, prompt, result_obj) in active_tasks.items():
-                # 创建异步任务，等待任务完成
-                task = asyncio.create_task(wait_for_task_completion(
-                    task_id, 
-                    callback=lambda status: update_status(f"检查任务状态: {task_id}, 尝试: {status['attempt']}")
-                ))
-                monitoring_tasks.append((task_id, task))
-            
-            # 等待任意一个任务完成（使用as_completed）
-            for future in asyncio.as_completed([task for _, task in monitoring_tasks]):
-                try:
-                    # 获取完成的任务结果
-                    final_status, result = await future
-                    
-                    # 找到对应的task_id
-                    completed_task_id = None
-                    for tid, t in monitoring_tasks:
-                        if t.done() and t._result == (final_status, result):
-                            completed_task_id = tid
-                            break
-                    
-                    if completed_task_id and completed_task_id in active_tasks:
-                        # 获取任务信息
-                        episode, scene, prompt, result_obj = active_tasks[completed_task_id]
-                        
-                        # 更新结果
-                        result_obj["status"] = final_status
-                        result_obj["final_result"] = result
-                        
-                        # 添加到结果字典
-                        ensure_result_path(results, episode, scene, result_obj)
-                        
-                        # 从活跃任务中移除
-                        del active_tasks[completed_task_id]
-                        
-                        # 更新完成数量
-                        completed_tasks += 1
-                        
-                        # 状态更新
-                        await update_status(
-                            f"任务完成: {completed_task_id} ({completed_tasks}/{total_tasks}), 状态: {final_status}"
-                        )
-                        
-                        # 启动下一个任务（如果有）
-                        if prompt_queue:
-                            new_episode, new_scene, new_prompt = prompt_queue.popleft()
-                            
-                            # 创建新任务
-                            await update_status(f"创建新任务: {new_episode}-{new_scene} '{new_prompt[:30]}...'")
-                            new_create_result = await call_runninghub_workflow(new_prompt)
-                            
-                            # 新结果对象
-                            new_result_obj = {
-                                "prompt": new_prompt,
-                                "create_result": new_create_result,
-                                "task_id": None,
-                                "status_result": None,
-                                "final_result": None,
-                                "status": None
-                            }
-                            
-                            # 检查是否创建成功
-                            new_task_id = None
-                            if new_create_result.get("code") == 0:
-                                new_task_id = new_create_result.get("data", {}).get("taskId")
-                                if new_task_id is None and "data" in new_create_result and "taskId" in new_create_result["data"]:
-                                    new_task_id = new_create_result["data"]["taskId"]
-                                
-                                new_result_obj["task_id"] = new_task_id
-                                
-                                if new_task_id:
-                                    # 加入活跃任务
-                                    active_tasks[new_task_id] = (new_episode, new_scene, new_prompt, new_result_obj)
-                                    await update_status(f"新任务已创建: {new_task_id} (活跃任务: {len(active_tasks)})")
-                                else:
-                                    # 创建失败但返回成功，添加到结果
-                                    ensure_result_path(results, new_episode, new_scene, new_result_obj)
-                                    completed_tasks += 1
-                            else:
-                                # 创建失败，可能是队列已满，重新放回队列开头
-                                if new_create_result.get("code") == 421:  # TASK_QUEUE_MAXED
-                                    prompt_queue.appendleft((new_episode, new_scene, new_prompt))
-                                    await update_status("RunningHub队列已满，新任务重新排队")
-                                    # 等待一段时间再尝试
-                                    await asyncio.sleep(5)
-                                else:
-                                    # 其他错误，记录并标记为完成
-                                    new_result_obj["status"] = "CREATE_FAILED"
-                                    ensure_result_path(results, new_episode, new_scene, new_result_obj)
-                                    completed_tasks += 1
-                                    await update_status(f"新任务创建失败: {new_create_result.get('msg', 'unknown error')}")
-                        
-                        # 如果所有监控的任务都已完成，跳出当前循环
-                        break
-                
-                except Exception as e:
-                    await update_status(f"监控任务出错: {str(e)}")
-            
-            # 取消未完成的监控任务
-            for _, task in monitoring_tasks:
-                if not task.done():
-                    task.cancel()
-            
-            # 如果没有活跃任务但还有队列中的任务，尝试启动新任务
-            if not active_tasks and prompt_queue:
-                continue
-        
-        # 如果没有活跃任务但队列中还有任务，尝试启动新任务
-        elif prompt_queue:
-            episode, scene, prompt = prompt_queue.popleft()
-            
-            # 创建任务
-            await update_status(f"创建任务中: {episode}-{scene} '{prompt[:30]}...'")
+            # 调用RunningHub API创建任务
             create_result = await call_runninghub_workflow(prompt)
             
-            # 结果对象
-            result_obj = {
+            # 提取task_id，如果不存在则使用默认值
+            task_id = None
+            if create_result and isinstance(create_result, dict) and "data" in create_result:
+                task_id = create_result.get("data", {}).get("taskId")
+            
+            # 确保结果字典有正确的结构
+            if episode_key not in results:
+                results[episode_key] = {}
+            if scene_key not in results[episode_key]:
+                results[episode_key][scene_key] = {}
+                
+            # 保存任务结果的初始状态
+            task_result = {
                 "prompt": prompt,
                 "create_result": create_result,
-                "task_id": None,
+                "task_id": task_id,
                 "status_result": None,
                 "final_result": None,
-                "status": None
+                "status": "CREATED" if task_id else "FAILED"
             }
             
-            # 检查是否创建成功
-            task_id = None
-            if create_result.get("code") == 0:
-                task_id = create_result.get("data", {}).get("taskId")
-                if task_id is None and "data" in create_result and "taskId" in create_result["data"]:
-                    task_id = create_result["data"]["taskId"]
+            # 如果任务创建成功，等待完成
+            if task_id:
+                print(f"任务创建成功: RunningHub ID={task_id}")
+                start_time = asyncio.get_event_loop().time()
+                final_status, final_result = await wait_for_task_completion(task_id)
+                duration = asyncio.get_event_loop().time() - start_time
+                print(f"任务完成: {task_id}, 状态: {final_status}, 用时: {duration:.2f}秒")
                 
-                result_obj["task_id"] = task_id
+                # 更新任务结果
+                task_result["status_result"] = final_status
+                task_result["final_result"] = final_result
+                task_result["status"] = "SUCCESS" if final_status in ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED"] else "FAILED"
                 
-                if task_id:
-                    # 加入活跃任务
-                    active_tasks[task_id] = (episode, scene, prompt, result_obj)
-                    await update_status(f"任务已创建: {task_id} (活跃任务: {len(active_tasks)})")
-                else:
-                    # 创建失败但返回成功，添加到结果
-                    ensure_result_path(results, episode, scene, result_obj)
-                    completed_tasks += 1
-            else:
-                # 创建失败，可能是队列已满，重新放回队列开头
-                if create_result.get("code") == 421:  # TASK_QUEUE_MAXED
-                    prompt_queue.appendleft((episode, scene, prompt))
-                    await update_status("RunningHub队列已满，任务重新排队")
-                    # 等待一段时间再尝试
-                    await asyncio.sleep(5)
-                else:
-                    # 其他错误，记录并标记为完成
-                    result_obj["status"] = "CREATE_FAILED"
-                    ensure_result_path(results, episode, scene, result_obj)
-                    completed_tasks += 1
-                    await update_status(f"任务创建失败: {create_result.get('msg', 'unknown error')}")
-        
-        # 等待一段时间，避免过于频繁检查
-        if active_tasks or prompt_queue:
-            await asyncio.sleep(2)
+                # 保存更新后的结果
+                results[episode_key][scene_key][prompt_index] = task_result
+            
+            # 返回结果
+            return task_result
+            
+        except Exception as e:
+            print(f"处理任务时出错: {str(e)}")
+            error_result = {
+                "prompt": task.get("prompt", ""),
+                "error": str(e),
+                "status": "ERROR"
+            }
+            
+            # 确保能正确保存错误结果
+            episode_key = task.get("episode_key", "未知集数")
+            scene_key = task.get("scene_key", "未知场次")
+            prompt_index = task.get("prompt_index", 0)
+            
+            if episode_key not in results:
+                results[episode_key] = {}
+            if scene_key not in results[episode_key]:
+                results[episode_key][scene_key] = {}
+                
+            results[episode_key][scene_key][prompt_index] = error_result
+            return error_result
+
+    # 任务处理器
+    async def worker():
+        nonlocal completed_tasks
+        while True:
+            try:
+                # 获取下一个任务
+                task = await task_queue.get()
+                
+                # 添加到活动任务列表
+                active_tasks.append(task)
+                
+                # 更新状态
+                await update_status(f"正在处理 第{task['episode']}集 场次{task['scene']} 提示词{task['prompt_index']}...")
+                
+                # 处理任务
+                result = await process_task(task)
+                
+                # 更新计数器和状态
+                completed_tasks += 1
+                active_tasks.remove(task)
+                task_queue.task_done()
+                
+                # 更新状态
+                # await update_status(f"已完成 {completed_tasks}/{total_tasks} 个任务，队列剩余 {task_queue.qsize()} 个")
+                
+                # 在任务处理后添加
+                print(f"任务处理结果: {task['episode_key']}, 场次{task['scene_key']}, 提示词{task['prompt_index']}, 状态: {result.get('status', 'UNKNOWN')}")
+                print(f"队列状态: 剩余{task_queue.qsize()}项, 完成{completed_tasks}/{total_tasks}")
+                
+            except Exception as e:
+                print(f"Worker异常: {str(e)}")
+                if task in active_tasks:
+                    active_tasks.remove(task)
+                task_queue.task_done()
     
-    await update_status(f"所有任务处理完成！共 {completed_tasks}/{total_tasks} 个任务")
+    # 启动工作器任务
+    workers = []
+    for _ in range(MAX_CONCURRENT_TASKS):
+        worker_task = asyncio.create_task(worker())
+        workers.append(worker_task)
+    
+    # 等待所有任务完成
+    await update_status(f"开始处理 {total_tasks} 个任务，最大并发 {MAX_CONCURRENT_TASKS}")
+    await task_queue.join()
+    
+    # 取消所有工作器任务
+    for worker_task in workers:
+        worker_task.cancel()
+    
+    # 检查所有结果，确保格式正确
+    for episode_key, episode_results in results.items():
+        for scene_key, scene_results in episode_results.items():
+            for prompt_index, result in scene_results.items():
+                # 确保result包含所有必要字段
+                if "prompt" not in result and episode_key in original_prompts_dict:
+                    if scene_key in original_prompts_dict[episode_key]:
+                        if prompt_index in original_prompts_dict[episode_key][scene_key]:
+                            result["prompt"] = original_prompts_dict[episode_key][scene_key][prompt_index]
+                
+                # 添加状态字段
+                if "status" not in result:
+                    if "final_result" in result and result["final_result"]:
+                        result["status"] = "SUCCESS"
+                    elif "error" in result:
+                        result["status"] = "ERROR"
+                    else:
+                        result["status"] = "UNKNOWN"
+    
+    # 启动队列监控任务
+    async def monitor_queue():
+        while not task_queue.empty() or active_tasks:
+            print(f"队列监控: 剩余{task_queue.qsize()}项, 活动{len(active_tasks)}项, 完成{completed_tasks}/{total_tasks}")
+            for i, task in enumerate(active_tasks):
+                print(f"  活动任务 #{i+1}: 第{task['episode']}集, 场次{task['scene']}, 提示词{task['prompt_index']}")
+            await asyncio.sleep(30)  # 每30秒报告一次
+
+    monitor_task = asyncio.create_task(monitor_queue())
+    
     return results
 
 def ensure_result_path(results, episode, scene, result_obj):

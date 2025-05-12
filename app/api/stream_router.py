@@ -18,7 +18,7 @@ from app.utils.storage import (
 )
 from app.utils.text_utils import extract_scene_prompts as extract_prompts, format_scene_prompts
 from app.core.config import API_KEY, API_URL
-from app.utils.runninghub_api import process_scene_prompts, query_task_status, query_task_result
+from app.utils.runninghub_api import MAX_CONCURRENT_TASKS, call_runninghub_workflow, process_scene_prompts, query_task_status, query_task_result, wait_for_task_completion
 
 # 定义请求模型
 class StreamScriptGenerationRequest(BaseModel):
@@ -336,12 +336,8 @@ async def stream_extract_scene_prompts(task_id: str, request: Optional[ExtractSc
 async def process_prompts_with_runninghub(task_id: str, request: Optional[RunningHubProcessRequest] = None):
     """
     将剧本中提取的画面描述词发送到RunningHub API处理
-    使用task_id标识剧本，采用队列方式处理提示词
+    使用task_id标识剧本，采用队列方式处理提示词，实时返回每个任务的结果
     """
-    # 如果请求体为空，使用路径参数创建请求对象
-    if request is None:
-        request = RunningHubProcessRequest(task_id=task_id)
-    
     # 检查存储中是否有对应剧本
     state = load_generation_state(task_id)
     if not state:
@@ -367,7 +363,7 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
                 print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
             
             # 如果指定了特定集数，只处理该集的内容
-            if request.episode is not None:
+            if request and request.episode is not None:
                 specific_episode = request.episode
                 if specific_episode in prompts_dict:
                     single_episode_dict = {specific_episode: prompts_dict[specific_episode]}
@@ -378,107 +374,291 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
                     yield format_sse_event("error", {"message": f"未找到第{specific_episode}集的画面描述词"})
                     return
             
-            # 计算提示词总数
-            total_prompts = 0
+            # 创建任务队列
+            task_queue = asyncio.Queue()
+            # 创建事件队列
+            event_queue = asyncio.Queue()
+            
+            # 任务进度跟踪
+            total_tasks = 0
+            completed_tasks = 0
+            active_tasks = []
+            
+            # 结果字典，用于存储中间结果
+            results = {}
+            
+            # 计算提示词总数并将任务加入队列
             for episode, scenes in prompts_dict.items():
+                # 格式化集数键为"第X集"
+                episode_key = f"第{episode}集" if not str(episode).startswith("第") else str(episode)
+                results[episode_key] = {}
+                
                 for scene, prompts in scenes.items():
-                    total_prompts += len([p for p in prompts if p.replace('#', '').strip()])
+                    # 格式化场景键为"场次X-X"
+                    scene_key = f"场次{scene}" if not str(scene).startswith("场次") else str(scene)
+                    results[episode_key][scene_key] = {}
+                    
+                    # 添加有效提示词到队列
+                    for idx, prompt in enumerate(prompts):
+                        clean_prompt = prompt.replace('#', '').strip()
+                        if clean_prompt:
+                            total_tasks += 1
+                            await task_queue.put({
+                                "episode": episode,
+                                "episode_key": episode_key,
+                                "scene": scene,
+                                "scene_key": scene_key,
+                                "prompt_index": idx,
+                                "prompt": clean_prompt
+                            })
             
             # 发送状态更新
             yield format_sse_event("status", {
-                "message": f"检测到{total_prompts}个提示词，将使用队列方式处理(最大并发3个)...",
-                "total_prompts": total_prompts
+                "message": f"检测到{total_tasks}个提示词，将使用队列方式处理(最大并发{MAX_CONCURRENT_TASKS}个)...",
+                "total_prompts": total_tasks
             })
             
-            # 创建状态更新回调
-            async def status_callback(status_info):
-                """接收状态更新并通过SSE发送到客户端"""
-                message = status_info.get("message", "处理中...")
+            # 处理单个任务的协程（注意：没有yield，而是使用队列）
+            async def process_task(task):
+                try:
+                    episode_key = task["episode_key"]
+                    scene_key = task["scene_key"]
+                    prompt_index = task["prompt_index"]
+                    prompt = task["prompt"]
+                    
+                    print(f"开始处理任务: {episode_key} {scene_key} 提示词{prompt_index}")
+                    
+                    # 调用API
+                    create_result = await call_runninghub_workflow(prompt)
+                    print(f"创建任务结果: {create_result}")
+                    
+                    # 提取runninghub_task_id
+                    runninghub_task_id = None
+                    if create_result and isinstance(create_result, dict):
+                        if "data" in create_result:
+                            data = create_result.get("data", {})
+                            # data可能是字典也可能是字符串
+                            if isinstance(data, dict):
+                                runninghub_task_id = data.get("taskId")
+                            elif isinstance(data, str) and data.isdigit():
+                                # 有时API可能直接返回数字ID作为字符串
+                                runninghub_task_id = data
+                        # 有些API响应可能直接将taskId放在顶层
+                        elif "taskId" in create_result:
+                            runninghub_task_id = create_result.get("taskId")
+                            
+                        print(f"提取的RunningHub任务ID: {runninghub_task_id}")
+                    
+                    # 如果没有提取到有效的taskId，则设置为失败
+                    if not runninghub_task_id:
+                        print(f"未能从创建结果中提取有效的任务ID: {create_result}")
+                    
+                    # 创建任务结果
+                    task_result = {
+                        "prompt": prompt,
+                        "create_result": create_result,
+                        "task_id": runninghub_task_id,
+                        "status_result": None,
+                        "final_result": None,
+                        "status": "CREATED" if runninghub_task_id else "FAILED"
+                    }
+                    
+                    # 保存任务结果
+                    if episode_key not in results:
+                        results[episode_key] = {}
+                    if scene_key not in results[episode_key]:
+                        results[episode_key][scene_key] = {}
+                    
+                    results[episode_key][scene_key][prompt_index] = task_result
+                    
+                    # 将创建事件发送到队列
+                    create_event = format_sse_event("task_created", {
+                        "episode": episode_key,
+                        "scene": scene_key,
+                        "prompt_index": prompt_index,
+                        "task_id": runninghub_task_id
+                    })
+                    print(f"发送创建事件: {episode_key} {scene_key} 提示词{prompt_index}")
+                    await event_queue.put(create_event)
+                    
+                    # 如果任务创建成功，等待完成
+                    if runninghub_task_id:
+                        print(f"等待任务完成: {runninghub_task_id}")
+                        final_status, final_result = await wait_for_task_completion(runninghub_task_id)
+                        print(f"任务完成: {runninghub_task_id}, 状态: {final_status}")
+                        
+                        # 更新任务结果
+                        task_result["status_result"] = final_status
+                        task_result["final_result"] = final_result
+                        task_result["status"] = "SUCCESS" if final_status in ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED"] else "FAILED"
+                        
+                        # 保存更新后的结果
+                        results[episode_key][scene_key][prompt_index] = task_result
+                        
+                        # 将完成事件发送到队列
+                        complete_event = format_sse_event("task_completed", {
+                            "episode": episode_key,
+                            "scene": scene_key,
+                            "prompt_index": prompt_index,
+                            "task_id": runninghub_task_id,
+                            "status": task_result["status"],
+                            "result": {
+                                "episode": episode_key,
+                                "results": {
+                                    scene_key: {
+                                        str(prompt_index): task_result
+                                    }
+                                }
+                            }
+                        })
+                        print(f"发送完成事件: {episode_key} {scene_key} 提示词{prompt_index}")
+                        await event_queue.put(complete_event)
+                    
+                    # 返回结果，而不是yield
+                    return task_result
+                    
+                except Exception as e:
+                    print(f"处理任务时出错: {str(e)}")
+                    # 处理错误...
+                    # 将错误事件发送到队列
+                    error_event = format_sse_event("task_error", {
+                        "episode": task["episode_key"],
+                        "scene": task["scene_key"],
+                        "prompt_index": task["prompt_index"],
+                        "error": str(e)
+                    })
+                    await event_queue.put(error_event)
+                    
+                    return {"error": str(e), "status": "ERROR"}
+            
+            # Worker协程（不使用yield）
+            async def worker():
+                nonlocal completed_tasks
                 
-                # 添加详细的任务处理信息
-                active_tasks = status_info.get("active_tasks", [])
-                active_tasks_detail = []
+                while True:
+                    task = None
+                    try:
+                        # 获取任务
+                        task = await task_queue.get()
+                        
+                        # 添加到活动任务
+                        active_tasks.append(task)
+                        
+                        # 发送状态更新到队列
+                        status_event = format_sse_event("status", {
+                            "message": f"正在处理 第{task['episode']}集 场次{task['scene']} 提示词{task['prompt_index']}...",
+                            "active_tasks": [{"episode": t["episode"], "scene": t["scene"], "prompt_index": t["prompt_index"]} for t in active_tasks],
+                            "completed": completed_tasks,
+                            "total": total_tasks,
+                            "queue_size": task_queue.qsize()
+                        })
+                        await event_queue.put(status_event)
+                        
+                        # 处理任务
+                        result = await process_task(task)
+                        print(f"任务处理完成: {task['episode_key']}, 场次{task['scene_key']}, 提示词{task['prompt_index']}, 状态: {result.get('status', 'UNKNOWN')}")
+                        
+                        # 更新计数
+                        completed_tasks += 1
+                        
+                        # 发送进度更新
+                        progress_event = format_sse_event("progress", {
+                            "completed": completed_tasks,
+                            "total": total_tasks,
+                            "percentage": int(completed_tasks * 100 / total_tasks)
+                        })
+                        await event_queue.put(progress_event)
+                        
+                        print(f"队列状态: 已完成={completed_tasks}, 总数={total_tasks}, 剩余={task_queue.qsize()}, 活动任务数={len(active_tasks)}")
+                        
+                        # 成功处理，标记任务完成
+                        task_queue.task_done()
+                        
+                    except asyncio.CancelledError:
+                        # 工作器被取消，不调用task_done()
+                        print(f"工作器被取消")
+                        # 如果没有获取任务就被取消，不要调用task_done()
+                        break
+                        
+                    except Exception as e:
+                        print(f"Worker异常: {str(e)}")
+                        import traceback
+                        print(traceback.format_exc())
+                        
+                    finally:
+                        # 从活动任务中移除
+                        if task and task in active_tasks:
+                            active_tasks.remove(task)
+            
+            # 启动worker任务
+            workers = []
+            for i in range(MAX_CONCURRENT_TASKS):
+                print(f"启动worker {i+1}")
+                worker_task = asyncio.create_task(worker())
+                workers.append(worker_task)
+            
+            # 从事件队列读取并yield事件
+            try:
+                # 设置是否已发送完成事件的标志
+                complete_sent = False
                 
-                if active_tasks:
-                    print(f"正在处理的任务:")
-                    for task in active_tasks:
-                        task_info = f"第{task.get('episode', '?')}集 场景{task.get('scene', '?')} 提示词{task.get('prompt_index', '?')}"
-                        print(f"  - {task_info}")
-                        active_tasks_detail.append(task_info)
+                while True:
+                    try:
+                        # 等待事件，较短的超时确保响应性
+                        event = await asyncio.wait_for(event_queue.get(), timeout=0.5)
+                        print(f"从事件队列获取到事件，准备发送")
+                        yield event
+                        event_queue.task_done()
+                        
+                    except asyncio.TimeoutError:
+                        # 检查是否所有任务都已完成
+                        if task_queue.empty() and not active_tasks and completed_tasks == total_tasks:
+                            if not complete_sent:
+                                print("所有任务完成，发送完成事件")
+                                yield format_sse_event("complete", {})
+                                complete_sent = True
+                                # 不立即退出循环，给一些时间让最后的事件被处理
+                                print("等待3秒确保所有事件处理完成")
+                                await asyncio.sleep(3)
+                                break
+                            else:
+                                # 最后再等待一会，确保所有事件都已处理
+                                await asyncio.sleep(1)
+                                break
+                            
+                        # 发送更新状态
+                        if not task_queue.empty() or active_tasks:
+                            print(f"等待任务完成: 已完成={completed_tasks}/{total_tasks}, 队列剩余={task_queue.qsize()}, 活动任务={len(active_tasks)}")
+            
+            except Exception as e:
+                print(f"事件处理循环异常: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
                 
-                yield_event = format_sse_event("queue_status", {
-                    "message": message,
-                    "active_tasks_count": len(active_tasks),
-                    "active_tasks_detail": active_tasks_detail,
-                    "completed": status_info.get("completed", 0),
-                    "total": status_info.get("total", 0),
-                    "queue_size": status_info.get("queue_size", 0)
-                })
-                return yield_event
-            
-            # 发送状态更新
-            yield format_sse_event("status", {"message": "开始处理提示词队列，每个任务等待时间增加至10秒..."})
-            
-            # 处理开始时间
-            start_time = asyncio.get_event_loop().time()
-            
-            # 定义状态收集器
-            status_events = []
-            
-            # 状态回调包装器
-            async def collect_status_events(status_info):
-                event = await status_callback(status_info)
-                status_events.append(event)
-            
-            # 调用处理函数
-            print("开始调用RunningHub API处理画面描述词...")
-            results = await process_scene_prompts(prompts_dict, status_callback=collect_status_events)
-            
-            # 发送收集的状态事件（每5个事件发送一次，避免事件过多）
-            for i in range(0, len(status_events), 5):
-                # 只发送这个批次的最后一个事件
-                yield status_events[min(i + 4, len(status_events) - 1)]
-                await asyncio.sleep(0.05)  # 小延迟，避免客户端过载
-            
-            # 处理结束时间
-            end_time = asyncio.get_event_loop().time()
-            processing_time = end_time - start_time
-            
-            # 发送处理完成信息
-            print(f"所有提示词处理完成！共耗时{processing_time:.2f}秒")
-            yield format_sse_event("status", {
-                "message": f"所有提示词处理完成！共耗时{processing_time:.2f}秒"
-            })
-            
-            # 打印处理结果统计
-            success_count = 0
-            error_count = 0
-            
-            for episode, episode_results in results.items():
-                for scene, scene_results in episode_results.items():
-                    for prompt_index, result in scene_results.items():
-                        if "error" in result:
-                            error_count += 1
-                        else:
-                            success_count += 1
-            
-            print(f"处理结果统计: 成功={success_count}, 失败={error_count}")
-            
-            # 对于每个集数，分别发送事件
-            for episode, episode_results in results.items():
-                print(f"发送第{episode}集的处理结果")
-                yield format_sse_event("runninghub_results", {
-                    "episode": episode,
-                    "results": episode_results
-                })
-                # 小延迟，帮助客户端处理
-                await asyncio.sleep(0.1)
-            
-            # 发送完成事件
-            yield format_sse_event("complete", {})
+            finally:
+                # 取消所有worker
+                print("准备取消所有worker")
+                for worker_task in workers:
+                    if not worker_task.done():
+                        print(f"取消worker任务")
+                        worker_task.cancel()
+                
+                # 等待所有worker正常结束
+                try:
+                    print("等待所有worker结束...")
+                    await asyncio.sleep(1)  # 给worker一些时间来处理取消
+                except Exception as e:
+                    print(f"等待worker结束时异常: {str(e)}")
+                
+                # 如果还没有发送完成事件，确保发送
+                if not complete_sent:
+                    print("发送最终完成事件")
+                    yield format_sse_event("complete", {})
+                
+                print("事件生成器结束")
             
         except Exception as e:
-            # 发送错误事件
+            # 发送错误
             import traceback
             error_msg = f"处理画面描述词出错: {str(e)}\n{traceback.format_exc()}"
             print(error_msg)
@@ -491,7 +671,7 @@ async def process_prompts_with_runninghub(task_id: str, request: Optional[Runnin
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # 禁用Nginx缓冲
+            "X-Accel-Buffering": "no"
         }
     )
 
@@ -564,3 +744,5 @@ def format_sse_event(event_type: str, data: Any) -> str:
     """格式化SSE事件"""
     json_data = json.dumps(data, ensure_ascii=False)
     return f"event: {event_type}\ndata: {json_data}\n\n" 
+
+
