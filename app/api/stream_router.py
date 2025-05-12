@@ -471,7 +471,9 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                     if scene_key not in results[episode_key]:
                         results[episode_key][scene_key] = {}
                     
-                    results[episode_key][scene_key][prompt_index] = task_result
+                    # 确保prompt_index是字符串，避免在字典操作中出现类型问题
+                    str_prompt_index = str(prompt_index)
+                    results[episode_key][scene_key][str_prompt_index] = task_result
                     
                     # 将创建事件发送到队列
                     create_event = format_sse_event("task_created", {
@@ -495,7 +497,7 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                         task_result["status"] = "SUCCESS" if final_status in ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED"] else "FAILED"
                         
                         # 保存更新后的结果
-                        results[episode_key][scene_key][prompt_index] = task_result
+                        results[episode_key][scene_key][str_prompt_index] = task_result
                         
                         # 将完成事件发送到队列
                         complete_event = format_sse_event("task_completed", {
@@ -508,7 +510,7 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                                 "episode": episode_key,
                                 "results": {
                                     scene_key: {
-                                        str(prompt_index): task_result
+                                        str_prompt_index: task_result
                                     }
                                 }
                             }
@@ -526,7 +528,7 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                     error_event = format_sse_event("task_error", {
                         "episode": task["episode_key"],
                         "scene": task["scene_key"],
-                        "prompt_index": task["prompt_index"],
+                        "prompt_index": str(task["prompt_index"]),  # 确保是字符串
                         "error": str(e)
                     })
                     await event_queue.put(error_event)
@@ -549,7 +551,7 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                         # 发送状态更新到队列
                         status_event = format_sse_event("status", {
                             "message": f"正在处理 第{task['episode']}集 场次{task['scene']} 提示词{task['prompt_index']}...",
-                            "active_tasks": [{"episode": t["episode"], "scene": t["scene"], "prompt_index": t["prompt_index"]} for t in active_tasks],
+                            "active_tasks": [{"episode": str(t["episode"]), "scene": str(t["scene"]), "prompt_index": str(t["prompt_index"])} for t in active_tasks],
                             "completed": completed_tasks,
                             "total": total_tasks,
                             "queue_size": task_queue.qsize()

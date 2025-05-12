@@ -253,7 +253,7 @@ async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], s
                 clean_prompt = prompt.replace('#', '').strip()
                 if clean_prompt:
                     # 保存原始提示词，用于后续格式化
-                    original_prompts_dict[episode_key][scene_key][idx] = clean_prompt
+                    original_prompts_dict[episode_key][scene_key][str(idx)] = clean_prompt
                     
                     total_tasks += 1
                     await task_queue.put({
@@ -325,8 +325,11 @@ async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], s
                 task_result["final_result"] = final_result
                 task_result["status"] = "SUCCESS" if final_status in ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED"] else "FAILED"
                 
-                # 保存更新后的结果
-                results[episode_key][scene_key][prompt_index] = task_result
+                # 保存更新后的结果 - 确保使用字符串索引
+                results[episode_key][scene_key][str(prompt_index)] = task_result
+            else:
+                # 保存失败结果 - 确保使用字符串索引
+                results[episode_key][scene_key][str(prompt_index)] = task_result
             
             # 返回结果
             return task_result
@@ -349,7 +352,7 @@ async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], s
             if scene_key not in results[episode_key]:
                 results[episode_key][scene_key] = {}
                 
-            results[episode_key][scene_key][prompt_index] = error_result
+            results[episode_key][scene_key][str(prompt_index)] = error_result
             return error_result
 
     # 任务处理器
@@ -404,12 +407,12 @@ async def process_scene_prompts(prompts_dict: Dict[int, Dict[str, List[str]]], s
     # 检查所有结果，确保格式正确
     for episode_key, episode_results in results.items():
         for scene_key, scene_results in episode_results.items():
-            for prompt_index, result in scene_results.items():
+            for prompt_index_str, result in scene_results.items():
                 # 确保result包含所有必要字段
                 if "prompt" not in result and episode_key in original_prompts_dict:
                     if scene_key in original_prompts_dict[episode_key]:
-                        if prompt_index in original_prompts_dict[episode_key][scene_key]:
-                            result["prompt"] = original_prompts_dict[episode_key][scene_key][prompt_index]
+                        if prompt_index_str in original_prompts_dict[episode_key][scene_key]:
+                            result["prompt"] = original_prompts_dict[episode_key][scene_key][prompt_index_str]
                 
                 # 添加状态字段
                 if "status" not in result:
