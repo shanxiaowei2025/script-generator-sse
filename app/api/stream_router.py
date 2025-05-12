@@ -269,15 +269,14 @@ async def cancel_streaming(task_id: str):
         content={"detail": f"任务 {task_id} 不在活跃流式生成中"}
     )
 
-@router.post("/stream/extract-scene-prompts/{task_id}")
-async def stream_extract_scene_prompts(task_id: str, request: Optional[ExtractScenePromptsRequest] = None):
+@router.post("/stream/extract-scene-prompts")
+async def stream_extract_scene_prompts(request: ExtractScenePromptsRequest):
     """
     流式提取剧本中的画面描述词并返回
     使用task_id标识剧本
     """
-    # 如果请求体为空，使用路径参数创建请求对象
-    if request is None:
-        request = ExtractScenePromptsRequest(task_id=task_id)
+    # 从请求体中获取task_id
+    task_id = request.task_id
     
     # 检查存储中是否有对应剧本
     state = load_generation_state(task_id)
@@ -332,12 +331,15 @@ async def stream_extract_scene_prompts(task_id: str, request: Optional[ExtractSc
         }
     )
 
-@router.post("/stream/process-prompts-with-runninghub/{task_id}")
-async def process_prompts_with_runninghub(task_id: str, request: Optional[RunningHubProcessRequest] = None):
+@router.post("/stream/process-prompts-with-runninghub")
+async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
     """
     将剧本中提取的画面描述词发送到RunningHub API处理
     使用task_id标识剧本，采用队列方式处理提示词，实时返回每个任务的结果
     """
+    # 从请求体中获取task_id
+    task_id = request.task_id
+    
     # 检查存储中是否有对应剧本
     state = load_generation_state(task_id)
     if not state:
