@@ -54,6 +54,26 @@ async def start_global_worker():
         print("启动全局工作器")
     
     try:
+        # 创建多个工作协程，实现并发处理
+        workers = []
+        for worker_id in range(MAX_CONCURRENT_TASKS):
+            worker_task = asyncio.create_task(worker_process(worker_id))
+            workers.append(worker_task)
+            print(f"已启动工作协程 #{worker_id + 1}")
+            
+        # 等待所有工作协程完成（实际上除非程序终止，否则不会完成）
+        await asyncio.gather(*workers)
+    
+    finally:
+        async with global_worker_lock:
+            is_global_worker_running = False
+            print("全局工作器已停止")
+
+# 单个工作协程的处理函数
+async def worker_process(worker_id: int):
+    print(f"工作协程 #{worker_id + 1} 已启动")
+    
+    try:
         while True:
             try:
                 # 从全局队列获取任务
@@ -71,7 +91,7 @@ async def start_global_worker():
                     continue
                 
                 # 更新任务状态为处理中
-                print(f"开始处理任务: {subtask_id} (请求: {request_id})")
+                print(f"工作协程 #{worker_id + 1} 开始处理任务: {subtask_id} (请求: {request_id})")
                 global_tasks_status[subtask_id] = {
                     "status": "PROCESSING",
                     "start_time": time.time(),
@@ -87,11 +107,47 @@ async def start_global_worker():
                 }))
                 
                 # 处理任务
-                print(f"处理任务: {subtask_id}, 请求ID: {request_id}")
+                print(f"工作协程 #{worker_id + 1} 处理任务: {subtask_id}, 请求ID: {request_id}")
                 try:
                     # 调用RunningHub API
                     prompt = task_data["prompt"]
-                    create_result = await call_runninghub_workflow(prompt)
+                    
+                    # 添加重试逻辑
+                    max_retries = 100
+                    retry_count = 0 
+                    retry_delay = 30  # 初始等待30秒
+                    create_result = None
+                    
+                    while retry_count < max_retries:
+                        # 调用API创建任务
+                        create_result = await call_runninghub_workflow(prompt)
+                        
+                        # 检查是否任务队列已满
+                        if (create_result and isinstance(create_result, dict) and 
+                            create_result.get("code") == 421 and 
+                            create_result.get("msg") == "TASK_QUEUE_MAXED"):
+                            
+                            retry_count += 1
+                            wait_time = retry_delay * retry_count  # 递增等待时间
+                            
+                            # 发送等待通知
+                            await event_queue.put(format_sse_event("task_waiting", {
+                                "episode": task_data["episode_key"],
+                                "scene": task_data["scene_key"],
+                                "prompt_index": str(task_data["prompt_index"]),
+                                "task_id": subtask_id,
+                                "retry": retry_count,
+                                "max_retries": max_retries,
+                                "wait_seconds": wait_time,
+                                "message": f"RunningHub队列已满，等待{wait_time}秒后重试 ({retry_count}/{max_retries})"
+                            }))
+                            
+                            print(f"工作协程 #{worker_id + 1} - RunningHub队列已满，等待{wait_time}秒后重试 ({retry_count}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            # 不是队列已满错误，跳出重试循环
+                            break
                     
                     # 提取runninghub_task_id
                     runninghub_task_id = None
@@ -132,7 +188,7 @@ async def start_global_worker():
                         result["status"] = "SUCCESS" if final_status in ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED"] else "FAILED"
                     
                     # 更新全局状态
-                    print(f"更新任务 {subtask_id} 状态为 COMPLETED")
+                    print(f"工作协程 #{worker_id + 1} 更新任务 {subtask_id} 状态为 COMPLETED")
                     global_tasks_status[subtask_id] = {
                         "status": "COMPLETED",
                         "end_time": time.time(),
@@ -161,11 +217,11 @@ async def start_global_worker():
                     
                 except Exception as e:
                     # 处理错误
-                    error_msg = f"处理任务时出错: {str(e)}"
+                    error_msg = f"工作协程 #{worker_id + 1} 处理任务时出错: {str(e)}"
                     print(error_msg)
                     
                     # 更新全局状态
-                    print(f"更新任务 {subtask_id} 状态为 ERROR")
+                    print(f"工作协程 #{worker_id + 1} 更新任务 {subtask_id} 状态为 ERROR")
                     global_tasks_status[subtask_id] = {
                         "status": "ERROR",
                         "end_time": time.time(),
@@ -199,7 +255,7 @@ async def start_global_worker():
                             if current_id in global_tasks_status and global_tasks_status[current_id]["status"] in ["COMPLETED", "ERROR"]:
                                 completed_count += 1
                         
-                        print(f"请求 {request_id} 进度更新: 完成={completed_count}/{expected_total}")
+                        print(f"工作协程 #{worker_id + 1} - 请求 {request_id} 进度更新: 完成={completed_count}/{expected_total}")
                         
                         # 发送进度更新
                         await event_queue.put(format_sse_event("progress", {
@@ -210,7 +266,7 @@ async def start_global_worker():
                         
                         # 检查请求的所有任务是否完成
                         if completed_count == expected_total:
-                            print(f"请求 {request_id} 的所有 {expected_total} 个任务已完成")
+                            print(f"工作协程 #{worker_id + 1} - 请求 {request_id} 的所有 {expected_total} 个任务已完成")
                             await event_queue.put(format_sse_event("all_tasks_completed", {
                                 "request_id": request_id,
                                 "completed": completed_count,
@@ -221,7 +277,7 @@ async def start_global_worker():
                         request_tasks = [t for t_id, t in global_tasks_status.items() if t["request_id"] == request_id]
                         completed_tasks = [t for t in request_tasks if t["status"] in ["COMPLETED", "ERROR"]]
                         
-                        print(f"备用进度方法，请求 {request_id} 完成={len(completed_tasks)}/{len(request_tasks)}")
+                        print(f"工作协程 #{worker_id + 1} - 备用进度方法，请求 {request_id} 完成={len(completed_tasks)}/{len(request_tasks)}")
                         
                         await event_queue.put(format_sse_event("progress", {
                             "completed": len(completed_tasks),
@@ -231,7 +287,7 @@ async def start_global_worker():
                         
                         # 检查请求的所有任务是否完成
                         if len(completed_tasks) == len(request_tasks) and len(request_tasks) > 0:
-                            print(f"请求 {request_id} 的所有任务已完成 (备用方法)")
+                            print(f"工作协程 #{worker_id + 1} - 请求 {request_id} 的所有任务已完成 (备用方法)")
                             await event_queue.put(format_sse_event("all_tasks_completed", {
                                 "request_id": request_id,
                                 "completed": len(completed_tasks),
@@ -239,18 +295,23 @@ async def start_global_worker():
                             }))
             
             except asyncio.CancelledError:
-                print("全局工作器被取消")
+                print(f"工作协程 #{worker_id + 1} 被取消")
                 break
                 
             except Exception as e:
-                print(f"全局工作器异常: {str(e)}")
+                print(f"工作协程 #{worker_id + 1} 异常: {str(e)}")
                 import traceback
                 print(traceback.format_exc())
+                # 确保即使出现异常，全局队列任务也能标记为完成
+                try:
+                    global_task_queue.task_done()
+                except Exception:
+                    pass
     
-    finally:
-        async with global_worker_lock:
-            is_global_worker_running = False
-            print("全局工作器已停止")
+    except Exception as e:
+        print(f"工作协程 #{worker_id + 1} 致命错误: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
 
 # 启动全局工作器的后台任务
 def ensure_global_worker_running():
@@ -258,8 +319,8 @@ def ensure_global_worker_running():
     if not is_global_worker_running:
         # 创建后台任务
         asyncio.create_task(start_global_worker())
-        print("已启动全局工作器后台任务")
-        
+        print("已启动全局工作器后台任务，最多可并发处理 {} 个任务".format(MAX_CONCURRENT_TASKS))
+
 # 定义请求模型
 class StreamScriptGenerationRequest(BaseModel):
     genre: str
@@ -473,7 +534,7 @@ async def stream_generate_script(request: StreamScriptGenerationRequest):
                     print(f"事件处理异常: {str(e)}")
                     yield format_sse_event("error", {"message": str(e)})
                     break
-        
+            
         except Exception as e:
             print(f"事件生成器主异常: {str(e)}")
             yield format_sse_event("error", {"message": str(e)})
