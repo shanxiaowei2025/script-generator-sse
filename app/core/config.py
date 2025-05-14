@@ -42,6 +42,8 @@ RUNNINGHUB_CREATE_API_URL = os.getenv("RUNNINGHUB_CREATE_API_URL", "https://www.
 RUNNINGHUB_STATUS_API_URL = os.getenv("RUNNINGHUB_STATUS_API_URL", "https://www.runninghub.cn/task/openapi/status")
 # 查询任务结果API
 RUNNINGHUB_RESULT_API_URL = os.getenv("RUNNINGHUB_RESULT_API_URL", "https://www.runninghub.cn/task/openapi/outputs")
+# 取消任务API
+RUNNINGHUB_CANCEL_API_URL = os.getenv("RUNNINGHUB_CANCEL_API_URL", "https://www.runninghub.cn/task/openapi/cancel")
 # API密钥和工作流配置
 RUNNINGHUB_API_KEY = os.getenv("RUNNINGHUB_API_KEY", "d9ce3b3ace1242f5824396f69c33f0f3") # 默认值需要替换为实际的API Key
 RUNNINGHUB_WORKFLOW_ID = os.getenv("RUNNINGHUB_WORKFLOW_ID", "1917109902920323073")

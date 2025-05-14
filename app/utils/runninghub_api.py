@@ -7,6 +7,7 @@ from app.core.config import (
     RUNNINGHUB_CREATE_API_URL,
     RUNNINGHUB_STATUS_API_URL,
     RUNNINGHUB_RESULT_API_URL,
+    RUNNINGHUB_CANCEL_API_URL,
     RUNNINGHUB_API_KEY,
     RUNNINGHUB_WORKFLOW_ID,
     RUNNINGHUB_NODE_ID
@@ -20,6 +21,9 @@ TASK_STATUS_CHECK_INTERVAL = 15
 MAX_STATUS_CHECK_ATTEMPTS = 1000
 # 完成或失败的任务状态
 FINISHED_TASK_STATUSES = ["SUCCESS", "FINISHED", "COMPLETE", "COMPLETED", "FAILED", "ERROR"]
+
+# 全局的取消任务集合，用于跟踪已取消的任务
+cancelled_task_ids = set()
 
 async def call_runninghub_workflow(prompt: str) -> Dict[str, Any]:
     """
@@ -121,6 +125,41 @@ async def query_task_result(task_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e), "status": "failed"}
 
+async def cancel_runninghub_task(task_id: str) -> Dict[str, Any]:
+    """
+    取消RunningHub任务
+    
+    Args:
+        task_id (str): 任务ID
+        
+    Returns:
+        Dict[str, Any]: API响应结果，成功时code为0
+    """
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "apiKey": RUNNINGHUB_API_KEY,
+        "taskId": task_id
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                RUNNINGHUB_CANCEL_API_URL,
+                headers=headers,
+                json=payload
+            ) as response:
+                response_data = await response.json()
+                # 任务取消成功后，将任务ID添加到已取消集合
+                if response_data.get("code") == 0 or "SUCCESS" in str(response_data.get("msg", "")):
+                    cancelled_task_ids.add(task_id)
+                    print(f"任务 {task_id} 已添加到取消集合，当前取消集合大小: {len(cancelled_task_ids)}")
+                return response_data
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
 async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Dict]:
     """
     等待任务完成并返回状态
@@ -139,6 +178,12 @@ async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Di
     
     # 检查任务状态，直到完成或失败
     for attempt in range(MAX_STATUS_CHECK_ATTEMPTS):
+        # 检查任务是否已被取消
+        if task_id in cancelled_task_ids:
+            print(f"检测到任务 {task_id} 已被取消，停止状态监听")
+            final_status = "CANCELLED"
+            return final_status, {"message": "任务已取消"}
+            
         # 等待一段时间
         await asyncio.sleep(TASK_STATUS_CHECK_INTERVAL)
         
@@ -146,10 +191,24 @@ async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Di
         task_status_str = "UNKNOWN"
         
         try:
+            # 再次检查任务是否已被取消（在等待期间可能被取消）
+            if task_id in cancelled_task_ids:
+                print(f"检测到任务 {task_id} 已被取消，停止状态监听")
+                final_status = "CANCELLED"
+                return final_status, {"message": "任务已取消"}
+            
             # 查询任务状态
             print(f"查询任务状态: {task_id}, 尝试: {attempt+1}/{MAX_STATUS_CHECK_ATTEMPTS}")
             status_result = await query_task_status(task_id)
             print(f"状态查询响应: {status_result}")
+            
+            # 如果API返回任务不存在，检查是否是因为已被取消
+            if status_result.get("code") == 807 and "NOT_FOUND" in str(status_result.get("msg", "")):
+                print(f"任务 {task_id} 不存在，可能已被取消")
+                # 将任务添加到取消集合
+                cancelled_task_ids.add(task_id)
+                final_status = "CANCELLED"
+                return final_status, {"message": "任务已被取消或不存在"}
             
             # 如果提供了回调函数，通知状态更新
             if callback:
