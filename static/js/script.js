@@ -5,6 +5,16 @@ function displayScript(script) {
                              <div class="script-content">${script.replace(/\n/g, '<br>')}</div>`;
 }
 
+// 在文件开头/全局变量区域添加
+let typingQueue = [];
+let typingInProgress = false;
+let currentEpisode = 1;
+let totalEpisodes = 1;
+let isGenerating = false;
+let currentTaskId = null;
+let episodesContent = {};
+let characters_directory_complete = false;
+
 document.addEventListener('DOMContentLoaded', function() {
     // 获取DOM元素
     const scriptForm = document.getElementById('scriptForm');
@@ -18,18 +28,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const episodesContainer = document.getElementById('episodesContainer');
     const defaultMessage = document.getElementById('defaultMessage');
     
-    let currentTaskId = null; // 当前任务ID
-    let currentEpisode = 0;
-    let totalEpisodes = 0;
-    let isGenerating = false;
-    let generationAborted = false;
-    let episodesContent = {};  // 存储已生成的各集内容
-    
     let output = document.getElementById('output');
     let buffer = "";
     let typingSpeed = 10; // 毫秒/字符
-    let typingInProgress = false;
-    let typingQueue = [];
     
     // 打字机效果函数
     function typeWriter(text, callback) {
@@ -243,33 +244,45 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 处理SSE事件
     function handleSSEEvent(eventType, data) {
-        console.log('收到事件类型:', eventType, data);
+        console.log('收到事件:', eventType, data);
         
         switch (eventType) {
             case 'task_id':
                 currentTaskId = data.task_id;
-                console.log('已获取任务ID:', currentTaskId);
+                console.log('当前任务ID:', currentTaskId);
                 break;
                 
             case 'status':
                 statusElement.textContent = data.message;
+                loadingIndicator.style.display = 'block';
                 break;
                 
-            case 'progress':
-                updateProgress(data.current, data.total);
+            case 'task_created':
+                statusElement.textContent = `创建任务中... 第${data.episode}集, ${data.scene}, 第${data.prompt_index}个提示词`;
                 break;
                 
-            case 'initial_content':
-                displayInitialContent(data.content);
+            case 'subtask_completed':
+                // 处理单个子任务完成事件 - 注意：这不是整个流程的完成事件
+                statusElement.textContent = `子任务完成: 第${data.episode}集, ${data.scene}, 第${data.prompt_index}个提示词`;
+                break;
+                
+            case 'task_completed':
+                // 保留旧的事件处理，以防有些地方仍使用旧的事件类型
+                // 明确这只是子任务的完成，不是整体完成
+                statusElement.textContent = `子任务完成: 第${data.episode}集, ${data.scene}, 第${data.prompt_index}个提示词`;
                 break;
                 
             case 'content_chunk':
-                // 使用打字机效果显示内容
-                typingQueue.push(data.content);
-                
-                if (!typingInProgress) {
-                    let text = typingQueue.shift();
-                    typeWriter(text, null);
+                // 处理内容块，可能是角色表/目录或剧集内容
+                if (!characters_directory_complete) {
+                    // 初始内容块 (角色表和目录)
+                    // 同时使用打字机效果
+                    typingQueue.push(data.content);
+                    
+                    if (!typingInProgress) {
+                        let text = typingQueue.shift();
+                        typeWriter(text, null);
+                    }
                 }
                 break;
                 

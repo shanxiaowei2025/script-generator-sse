@@ -76,7 +76,7 @@ uvicorn app.main:app --host=0.0.0.0 --port=8003 --reload
 python -m app.main
 ```
 
-服务将在 `http://localhost:8000` 启动。
+服务将在 `http://localhost:8003` 启动。
 
 ## API端点
 

@@ -51,6 +51,9 @@ global_tasks_status = {}  # {task_id: status_dict}
 # 全局请求元数据，存储每个请求的任务总数和任务ID列表
 global_request_metadata = {}  # {request_id: {"total_tasks": n, "task_ids": [...]}}
 
+# 添加一个新的任务映射，用于快速查找属于特定请求的所有RunningHub任务ID
+global_runninghub_tasks = {}  # {request_id: set(runninghub_task_id1, runninghub_task_id2, ...)}
+
 # 启动全局工作器
 async def start_global_worker():
     global is_global_worker_running
@@ -127,6 +130,30 @@ async def worker_process(worker_id: int):
                     "task_id": subtask_id,
                     "status": "PROCESSING"
                 }))
+                
+                # 在创建任务前检查请求是否已被取消
+                if request_id in global_runninghub_tasks and "CANCELLED_REQUEST" in global_runninghub_tasks[request_id]:
+                    print(f"工作协程 #{worker_id + 1} - 请求 {request_id} 已被取消，跳过任务 {subtask_id}")
+                    
+                    # 更新任务状态为已取消
+                    global_tasks_status[subtask_id] = {
+                        "status": "CANCELLED",
+                        "end_time": time.time(),
+                        "request_id": request_id,
+                        "task_data": task_data,
+                        "message": "请求已被取消，任务未执行"
+                    }
+                    
+                    # 发送取消事件
+                    await event_queue.put(format_sse_event("task_cancelled", {
+                        "task_id": subtask_id,
+                        "message": "请求已被取消，任务未执行",
+                        "worker_id": worker_id + 1
+                    }))
+                    
+                    # 标记任务完成并返回
+                    global_task_queue.task_done()
+                    continue
                 
                 # 处理任务
                 print(f"工作协程 #{worker_id + 1} 处理任务: {subtask_id}, 请求ID: {request_id}")
@@ -268,6 +295,12 @@ async def worker_process(worker_id: int):
                     if runninghub_task_id and subtask_id in global_tasks_status:
                         global_tasks_status[subtask_id]["runninghub_task_id"] = runninghub_task_id
                         print(f"为任务 {subtask_id} 记录runninghub_task_id: {runninghub_task_id}")
+                        
+                        # 将RunningHub任务ID添加到全局映射
+                        if request_id not in global_runninghub_tasks:
+                            global_runninghub_tasks[request_id] = set()
+                        global_runninghub_tasks[request_id].add(runninghub_task_id)
+                        print(f"将RunningHub任务ID {runninghub_task_id} 添加到请求 {request_id} 的映射，当前任务数: {len(global_runninghub_tasks[request_id])}")
                     
                     # 如果创建成功，等待任务完成
                     result = {
@@ -278,8 +311,12 @@ async def worker_process(worker_id: int):
                     }
                     
                     if runninghub_task_id:
-                        # 等待RunningHub任务完成
-                        final_status, final_result = await wait_for_task_completion(runninghub_task_id)
+                        # 等待RunningHub任务完成，传递request_id以检查请求级别的取消
+                        final_status, final_result = await wait_for_task_completion(
+                            runninghub_task_id, 
+                            callback=None, 
+                            request_id=request_id
+                        )
                         
                         # 更新结果
                         result["status_result"] = final_status
@@ -297,8 +334,8 @@ async def worker_process(worker_id: int):
                         "runninghub_task_id": runninghub_task_id  # 直接保存runninghub_task_id
                     }
                     
-                    # 发送完成事件
-                    await event_queue.put(format_sse_event("task_completed", {
+                    # 发送完成事件 - 使用明确的单任务完成事件类型以避免与整体流程完成事件混淆
+                    await event_queue.put(format_sse_event("subtask_completed", {
                         "episode": task_data["episode_key"],
                         "scene": task_data["scene_key"],
                         "prompt_index": str(task_data["prompt_index"]),
@@ -954,21 +991,24 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                         yield event
                         event_queue.task_done()
                         
-                        # 检查是否是complete事件或cancel_complete事件
-                        if "complete" in event or "cancel_complete" in event or "all_tasks_completed" in event:
+                        # 检查是否是complete事件或cancel_complete事件，注意避免混淆task_completed与complete事件
+                        if (("event: complete" in event) or 
+                            ("event: cancel_complete" in event) or 
+                            ("event: all_tasks_completed" in event)):  # 确保完全匹配事件名称
+                            
                             # 标记已发送完成事件
                             if not complete_sent:
                                 print(f"收到完成或取消事件，准备结束事件流: {event}")
                                 
                                 # 如果收到的是取消事件，确保发送complete事件
-                                if "cancel_complete" in event and "complete" not in event:
+                                if "event: cancel_complete" in event and "event: complete" not in event:
                                     yield format_sse_event("complete", {
                                         "message": "所有任务处理完成(已取消)",
                                         "request_id": request_id
                                     })
                                 
                                 # 如果接收到all_tasks_completed但没有收到complete
-                                if "all_tasks_completed" in event and "complete" not in event:
+                                if "event: all_tasks_completed" in event and "event: complete" not in event:
                                     yield format_sse_event("complete", {
                                         "message": "所有任务处理完成",
                                         "request_id": request_id
@@ -977,7 +1017,7 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                                 complete_sent = True
                             
                             # 如果是complete事件，准备结束循环
-                            if "complete" in event:
+                            if "event: complete" in event:
                                 # 等待一小段时间确保所有事件都被处理
                                 await asyncio.sleep(1)
                                 print(f"收到complete事件，结束事件流")
@@ -1175,11 +1215,14 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
     request_id = request.request_id
     print(f"收到取消任务请求: request_id={request_id}")
     
-    # 添加调试信息 - 输出全局状态中所有任务的ID，帮助排查问题
+    # 添加调试信息 - 输出全局状态中的任务信息
     debug_info = {
         "global_tasks_count": len(global_tasks_status),
         "global_queue_size": global_task_queue.qsize(),
-        "sample_task_ids": list(global_tasks_status.keys())[:5] if global_tasks_status else []
+        "sample_task_ids": list(global_tasks_status.keys())[:5] if global_tasks_status else [],
+        "runninghub_tasks_count": sum(len(ids) for ids in global_runninghub_tasks.values()),
+        "request_has_tasks": request_id in global_runninghub_tasks,
+        "active_requests": list(global_runninghub_tasks.keys())
     }
     print(f"调试信息: {debug_info}")
     
@@ -1188,33 +1231,40 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
     runninghub_task_ids = set()  # 使用集合去重
     cancellation_results = []
     
-    # 查找所有与该task_id相关的任务 - 扩大搜索条件
+    # 1. 首先直接从全局RunningHub任务映射查找
+    if request_id in global_runninghub_tasks:
+        print(f"从全局映射中找到请求 {request_id} 的RunningHub任务")
+        runninghub_task_ids.update(global_runninghub_tasks[request_id])
+        print(f"已从全局映射中添加 {len(global_runninghub_tasks[request_id])} 个RunningHub任务ID")
+    
+    # 2. 查找所有与该task_id相关的任务
     for subtask_id, task_info in global_tasks_status.items():
         # 检查任务ID是否相关
         task_related = False
         
-        # 条件1: 子任务ID以task_id开头
+        # 条件1: 子任务ID以request_id开头
         if subtask_id.startswith(request_id):
             task_related = True
             print(f"找到匹配任务(子任务ID前缀): {subtask_id}")
             
-        # 条件2: 请求ID等于task_id
+        # 条件2: 请求ID等于request_id
         elif task_info.get("request_id") == request_id:
             task_related = True
             print(f"找到匹配任务(请求ID): {subtask_id}")
             
-        # 条件3: 任务数据中包含task_id
+        # 条件3: 任务数据中包含request_id
         elif "task_data" in task_info and str(task_info["task_data"]).find(request_id) != -1:
             task_related = True
             print(f"找到匹配任务(任务数据): {subtask_id}")
             
-        # 条件4: 如果task_id是UUID的一部分，检查部分匹配
+        # 条件4: 如果request_id是UUID的一部分，检查部分匹配
         elif len(request_id) > 8 and (subtask_id.find(request_id) != -1 or (task_info.get("request_id") and task_info.get("request_id").find(request_id) != -1)):
             task_related = True
             print(f"找到匹配任务(部分匹配): {subtask_id}")
         
         # 如果任务相关，添加到取消列表
         if task_related:
+            # 记录子任务ID
             tasks_to_cancel.append(subtask_id)
             
             # 尝试从任务信息中提取runninghub_task_id
@@ -1226,7 +1276,7 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
                 print(f"直接从任务信息中提取到RunningHub任务ID: {task_info['runninghub_task_id']}")
             
             # 方法2: 从结果字段提取
-            if "result" in task_info and task_info["result"].get("task_id"):
+            if "result" in task_info and isinstance(task_info["result"], dict) and task_info["result"].get("task_id"):
                 extracted_ids.append(task_info["result"].get("task_id"))
                 print(f"从结果字段提取到RunningHub任务ID: {task_info['result'].get('task_id')}")
             
@@ -1245,84 +1295,10 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
             
             # 添加所有提取到的ID
             for rid in extracted_ids:
-                if rid:
-                    runninghub_task_ids.add(rid)
+                if rid and isinstance(rid, (str, int)) and str(rid).strip():
+                    runninghub_task_ids.add(str(rid).strip())
                     print(f"找到RunningHub任务ID: {rid}")
-    
-    # 如果没有找到任务，检查全局请求元数据
-    if not tasks_to_cancel and request_id in global_request_metadata:
-        print(f"在全局请求元数据中找到task_id: {request_id}")
-        request_meta = global_request_metadata[request_id]
-        task_ids_list = request_meta.get("task_ids", [])
-        
-        for subtask_id in task_ids_list:
-            tasks_to_cancel.append(subtask_id)
-            if subtask_id in global_tasks_status and "result" in global_tasks_status[subtask_id]:
-                rid = global_tasks_status[subtask_id]["result"].get("task_id")
-                if rid:
-                    runninghub_task_ids.add(rid)
-    
-    # 如果没有找到任务，检查全局任务状态中是否有该请求的任务
-    if not tasks_to_cancel:
-        print(f"在全局状态中查找请求相关的所有任务: {request_id}")
-        
-        # 遍历全局任务状态，查找与request_id相关的所有任务
-        for subtask_id, task_info in global_tasks_status.items():
-            request_id = task_info.get("request_id")
-            if not request_id:
-                continue
-                
-            # 检查请求ID是否匹配
-            if request_id == request_id or request_id.startswith(request_id) or request_id.startswith(request_id):
-                tasks_to_cancel.append(subtask_id)
-                print(f"找到关联任务(通过请求ID): {subtask_id}")
-                
-                # 提取RunningHub任务ID
-                if "runninghub_task_id" in task_info:
-                    rid = task_info["runninghub_task_id"]
-                    if rid:
-                        runninghub_task_ids.add(rid)
-                        print(f"找到RunningHub任务ID: {rid}")
-                
-                # 从结果中提取
-                if "result" in task_info:
-                    result = task_info["result"]
-                    if isinstance(result, dict) and "task_id" in result:
-                        rid = result["task_id"]
-                        if rid:
-                            runninghub_task_ids.add(rid)
-                            print(f"找到RunningHub任务ID(从结果): {rid}")
-    
-    # 检查是否有与请求ID相关的处理中的任务（尚未完成且没有结果字段的任务）
-    if not runninghub_task_ids:
-        print(f"尝试查找处理中的任务的runninghub_task_id")
-        for subtask_id in tasks_to_cancel:
-            if subtask_id in global_tasks_status:
-                task_info = global_tasks_status[subtask_id]
-                # 检查全局事件队列中是否有task_created事件包含runninghub_task_id
-                request_id = task_info.get("request_id")
-                if request_id and request_id in global_event_queues:
-                    print(f"检查事件队列中的task_created事件: {request_id}")
-                    # 这里无法直接访问队列历史，但我们可以在取消操作前记录这些信息
-                    # 下一步实现队列历史记录功能
-    
-    # 如果通过上述方法仍找不到任何RunningHub任务ID，查找所有包含该task_id的子任务ID
-    if not runninghub_task_ids and len(request_id) > 8:
-        print(f"通过子任务ID前缀搜索关联任务")
-        for subtask_id, task_info in global_tasks_status.items():
-            if subtask_id.startswith(request_id) or request_id in subtask_id:
-                # 查找可能的runninghub_task_id
-                for key, value in task_info.items():
-                    if key == "runninghub_task_id" and isinstance(value, str):
-                        runninghub_task_ids.add(value)
-                        print(f"通过任务字段找到RunningHub任务ID: {value}")
-                    elif isinstance(value, dict):
-                        # 递归查找嵌套字典中的runninghub_task_id
-                        for k, v in value.items():
-                            if (k == "runninghub_task_id" or k == "task_id") and isinstance(v, str):
-                                runninghub_task_ids.add(v)
-                                print(f"在嵌套字典中找到RunningHub任务ID: {v}")
-    
+
     print(f"找到{len(tasks_to_cancel)}个相关任务, {len(runninghub_task_ids)}个RunningHub任务ID")
     
     # 取消所有找到的RunningHub任务
@@ -1351,26 +1327,26 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
     related_request_ids = set()
     for subtask_id in tasks_to_cancel:
         if subtask_id in global_tasks_status:
-            request_id = global_tasks_status[subtask_id].get("request_id")
-            if request_id:
-                related_request_ids.add(request_id)
+            req_id = global_tasks_status[subtask_id].get("request_id")
+            if req_id:
+                related_request_ids.add(req_id)
     
     # 更新任务状态为已取消并发送通知
-    cancelled_count = 0
+    updated_task_count = 0
     for subtask_id in tasks_to_cancel:
         try:
             if subtask_id in global_tasks_status:
                 # 更新状态为已取消
                 global_tasks_status[subtask_id]["status"] = "CANCELLED"
-                cancelled_count += 1
+                updated_task_count += 1
                 print(f"已取消任务: {subtask_id}")
                 
                 # 获取请求ID用于发送事件通知
-                request_id = global_tasks_status[subtask_id].get("request_id")
+                req_id = global_tasks_status[subtask_id].get("request_id")
                 
                 # 发送取消事件通知前端
-                if request_id and request_id in global_event_queues:
-                    event_queue = global_event_queues[request_id]
+                if req_id and req_id in global_event_queues:
+                    event_queue = global_event_queues[req_id]
                     await event_queue.put(format_sse_event("task_cancelled", {
                         "task_id": subtask_id,
                         "message": "任务已取消"
@@ -1378,7 +1354,15 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
         except Exception as e:
             print(f"取消任务 {subtask_id} 时出错: {str(e)}")
     
-    # 从全局队列中移除相关任务 (因为队列不支持按条件删除，只能创建新队列)
+    # 创建取消标记，防止后续创建的任务继续执行
+    # 这将阻止即使是在取消命令之后创建的任务
+    if request_id not in global_runninghub_tasks:
+        global_runninghub_tasks[request_id] = set()
+    
+    # 添加特殊标记表示这个请求已被取消
+    global_runninghub_tasks[request_id].add("CANCELLED_REQUEST")
+    
+    # 从全局队列中移除相关任务
     removed_count = 0
     if not global_task_queue.empty():
         # 创建临时队列存储需要保留的任务
@@ -1392,9 +1376,12 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
             while not global_task_queue.empty():
                 task = await global_task_queue.get()
                 subtask_id = task.get("subtask_id")
+                task_request_id = task.get("request_id")
                 
-                # 如果任务不在要取消的列表中，则保留
-                if subtask_id not in tasks_to_cancel:
+                # 如果任务不在要取消的列表中且不属于要取消的请求，则保留
+                if (subtask_id not in tasks_to_cancel and 
+                    (task_request_id != request_id) and 
+                    not (subtask_id and subtask_id.startswith(request_id))):
                     await temp_queue.put(task)
                 else:
                     removed_count += 1
@@ -1417,37 +1404,39 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
             print(f"清理队列时出错: {str(e)}")
     
     # 给所有相关的请求发送complete事件
-    for request_id in related_request_ids:
-        if request_id in global_event_queues:
+    notified_requests = 0
+    for req_id in related_request_ids:
+        if req_id in global_event_queues:
             try:
-                event_queue = global_event_queues[request_id]
+                event_queue = global_event_queues[req_id]
                 # 首先发送取消完成的通知
                 await event_queue.put(format_sse_event("cancel_complete", {
                     "message": "所有任务已成功取消",
-                    "request_id": request_id,
-                    "cancelled_count": cancelled_count
+                    "request_id": req_id,
+                    "cancelled_count": updated_task_count
                 }))
                 
                 # 然后发送流结束的complete事件
                 await event_queue.put(format_sse_event("complete", {
                     "message": "流处理已终止",
-                    "request_id": request_id,
+                    "request_id": req_id,
                     "reason": "任务已取消"
                 }))
                 
-                print(f"已向请求 {request_id} 发送完成事件")
+                notified_requests += 1
+                print(f"已向请求 {req_id} 发送完成事件")
             except Exception as e:
-                print(f"向请求 {request_id} 发送完成事件时出错: {str(e)}")
+                print(f"向请求 {req_id} 发送完成事件时出错: {str(e)}")
     
     return {
         "status": "success",
         "message": "任务取消请求已处理",
         "request_id": request_id,
-        "cancelled_tasks_count": cancelled_count,
+        "cancelled_runninghub_tasks": updated_task_count,
+        "updated_tasks": updated_task_count,
         "removed_from_queue": removed_count,
-        "runninghub_cancellations": cancellation_results,
         "tasks_affected": len(tasks_to_cancel),
-        "request_ids_notified": list(related_request_ids),
+        "request_ids_notified": notified_requests,
         "debug_info": debug_info
     }
 

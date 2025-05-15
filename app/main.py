@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from app.api.stream_router import router as stream_router
+from app.api.pdf_router import router as pdf_router
 from app.core.config import APP_HOST, APP_PORT, DEBUG
 
 # 创建应用目录
@@ -59,6 +60,7 @@ async def get_index(request: Request):
 
 # 挂载流式API路由
 app.include_router(stream_router, prefix="/api")
+app.include_router(pdf_router, prefix="/api/pdf")
 
 # 直接运行时的入口点
 if __name__ == "__main__":

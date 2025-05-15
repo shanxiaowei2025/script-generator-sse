@@ -160,13 +160,14 @@ async def cancel_runninghub_task(task_id: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e), "status": "failed"}
 
-async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Dict]:
+async def wait_for_task_completion(task_id: str, callback=None, request_id=None) -> Tuple[str, Dict]:
     """
     等待任务完成并返回状态
     
     Args:
         task_id (str): 任务ID
         callback (callable, optional): 状态更新回调函数
+        request_id (str, optional): 请求ID，用于检查请求级别的取消
         
     Returns:
         Tuple[str, Dict]: 任务状态和任务结果
@@ -174,15 +175,32 @@ async def wait_for_task_completion(task_id: str, callback=None) -> Tuple[str, Di
     final_status = None
     result = None
     
-    print(f"开始等待任务完成: {task_id}")
+    print(f"开始等待任务完成: {task_id}, 请求ID: {request_id}")
     
     # 检查任务状态，直到完成或失败
     for attempt in range(MAX_STATUS_CHECK_ATTEMPTS):
         # 检查任务是否已被取消
+        is_cancelled = False
+        cancel_reason = ""
+        
+        # 方法1: 直接检查任务ID是否在已取消集合中
         if task_id in cancelled_task_ids:
-            print(f"检测到任务 {task_id} 已被取消，停止状态监听")
+            is_cancelled = True
+            cancel_reason = "任务ID在取消列表中"
+        
+        # 方法2: 检查请求ID是否被标记为已取消
+        if not is_cancelled and request_id:
+            from app.api.stream_router import global_runninghub_tasks
+            if request_id in global_runninghub_tasks and "CANCELLED_REQUEST" in global_runninghub_tasks[request_id]:
+                is_cancelled = True
+                cancel_reason = "请求已被整体取消"
+                # 顺便把当前任务也加入取消列表
+                cancelled_task_ids.add(task_id)
+        
+        if is_cancelled:
+            print(f"检测到任务 {task_id} 已被取消({cancel_reason})，停止状态监听")
             final_status = "CANCELLED"
-            return final_status, {"message": "任务已取消"}
+            return final_status, {"message": f"任务已取消: {cancel_reason}"}
             
         # 等待一段时间
         await asyncio.sleep(TASK_STATUS_CHECK_INTERVAL)
