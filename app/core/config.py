@@ -22,10 +22,14 @@ MODEL_NAME = os.getenv("MODEL_NAME", "claude-3-7-sonnet-20250219")
 STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "app/storage")
 GENERATION_STATES_DIR = os.path.join(STORAGE_DIR, "generation_states")
 PARTIAL_CONTENTS_DIR = os.path.join(STORAGE_DIR, "partial_contents")
+PDFS_DIR = os.path.join(STORAGE_DIR, "pdfs")  # 新增PDF存储目录
+IMAGES_DIR = os.path.join(STORAGE_DIR, "images")  # 新增图片存储目录
 
 # 创建存储目录
 os.makedirs(GENERATION_STATES_DIR, exist_ok=True)
 os.makedirs(PARTIAL_CONTENTS_DIR, exist_ok=True)
+os.makedirs(PDFS_DIR, exist_ok=True)  # 确保PDF目录存在
+os.makedirs(IMAGES_DIR, exist_ok=True)  # 确保图片目录存在
 
 # 令牌限制
 DIRECTORY_TOKEN_LIMIT = 5000 # 目录生成限制

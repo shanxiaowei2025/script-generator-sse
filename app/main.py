@@ -1,21 +1,17 @@
 import os
-from fastapi import FastAPI, Request, responses
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from app.api.stream_router import router as stream_router
-from app.api.pdf_router import router as pdf_router
-from app.core.config import APP_HOST, APP_PORT, DEBUG
+from app.core.config import APP_HOST, APP_PORT, DEBUG, STORAGE_DIR
 
 # 创建应用目录
 os.makedirs("app/storage/generation_states", exist_ok=True)
 os.makedirs("app/storage/partial_contents", exist_ok=True)
-
-# 设置模板和静态文件目录的绝对路径
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+os.makedirs("app/storage/pdfs", exist_ok=True)  # 新增PDF存储目录
+os.makedirs("app/storage/images", exist_ok=True)  # 新增图片存储目录
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -49,24 +45,22 @@ app.add_middleware(
     max_age=600,
 )
 
-# 挂载静态文件目录
-app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
-
-# 添加主页路由
-@app.get("/")
-async def get_index(request: Request):
-    """返回主页模板"""
-    return templates.TemplateResponse("index.html", {"request": request})
+# 挂载静态文件服务
+# 提供PDF文件下载
+app.mount("/storage/pdfs", StaticFiles(directory="app/storage/pdfs"), name="pdfs")
+# 提供图片文件访问
+app.mount("/storage/images", StaticFiles(directory="app/storage/images"), name="images")
 
 # 挂载流式API路由
 app.include_router(stream_router, prefix="/api")
-app.include_router(pdf_router, prefix="/api/pdf")
 
 # 直接运行时的入口点
 if __name__ == "__main__":
     # 确保存储目录存在
     os.makedirs("app/storage/generation_states", exist_ok=True)
     os.makedirs("app/storage/partial_contents", exist_ok=True)
+    os.makedirs("app/storage/pdfs", exist_ok=True)  # 新增PDF存储目录
+    os.makedirs("app/storage/images", exist_ok=True)  # 新增图片存储目录
     
     # 启动服务器
     uvicorn.run("app.main:app", host=APP_HOST, port=APP_PORT, reload=DEBUG) 

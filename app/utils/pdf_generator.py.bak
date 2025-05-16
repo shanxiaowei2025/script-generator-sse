@@ -156,6 +156,33 @@ styles.add(ParagraphStyle(
     textColor=colors.black,
     encoding='utf-8'
 ))
+styles.add(ParagraphStyle(
+    name='TOC_Title',
+    fontName=font_name,
+    fontSize=14,
+    leading=18,
+    alignment=TA_CENTER,
+    spaceAfter=10,
+    encoding='utf-8'
+))
+styles.add(ParagraphStyle(
+    name='TOC_Entry',
+    fontName=font_name,
+    fontSize=10,
+    leading=14,
+    spaceBefore=2,
+    spaceAfter=2,
+    encoding='utf-8'
+))
+styles.add(ParagraphStyle(
+    name='TOC_Section',
+    fontName=font_name,
+    fontSize=12,
+    leading=16,
+    spaceBefore=6,
+    spaceAfter=4,
+    encoding='utf-8'
+))
 
 # 修改解析Markdown函数，增强表格处理能力
 def parse_markdown(text):
@@ -341,6 +368,21 @@ async def generate_script_pdf(
     elements.append(Paragraph(f"{title} - 剧本与场景图", styles['ChineseTitle']))
     elements.append(Spacer(1, 0.25 * inch))
     
+    # 创建目录项收集器
+    toc_entries = []
+    
+    # 预处理：检测剧本中包含的集数
+    all_episodes = set()
+    episode_pattern = re.compile(r'第\s*(\d+)\s*集|^\s*(\d+)\s*集', re.MULTILINE)
+    for match in episode_pattern.finditer(script_content):
+        episode_num = match.group(1) if match.group(1) else match.group(2)
+        all_episodes.add(episode_num)
+    
+    if all_episodes:
+        print(f"预处理：检测到剧本中包含以下集数: {sorted(list(all_episodes))}")
+    else:
+        print("预处理：未检测到明确的集数标记")
+    
     # 验证图片目录是否存在
     if task_id:
         image_dir = os.path.join(IMAGES_DIR, task_id)
@@ -367,8 +409,14 @@ async def generate_script_pdf(
     in_table = False
     table_rows = []
     
+    # 添加处理状态跟踪
+    processed_episodes = set()
+    processed_prompts = set()  # 添加已处理提示词的集合，避免重复处理
+    
     # 遍历剧本的每一行
     i = 0
+    skip_until_next_episode = False  # 添加标记变量，用于标记是否跳过当前集的剩余内容
+    
     while i < len(lines):
         line = lines[i].strip()
         
@@ -376,6 +424,37 @@ async def generate_script_pdf(
         if not line and not in_code_block and not in_table:
             i += 1
             continue
+            
+        # 如果当前在跳过模式，检查是否到了新的集
+        if skip_until_next_episode:
+            # 检查是否是新集的开始 - 增强匹配能力
+            is_new_episode = False
+            # 1. 标准格式: 第X集：标题
+            if re.search(r'第\s*\d+\s*集[：:]\s*.*', line, re.IGNORECASE):
+                is_new_episode = True
+            # 2. 简单格式: 第X集
+            elif re.search(r'^\s*第\s*\d+\s*集\s*$', line.strip(), re.IGNORECASE):
+                is_new_episode = True
+            # 3. 带标记格式: **第X集**或**第X集：标题**
+            elif re.search(r'\*\*\s*第\s*\d+\s*集.*\*\*', line, re.IGNORECASE):
+                is_new_episode = True
+            # 4. 仅数字格式: 第X
+            elif re.search(r'^\s*第\s*\d+\s*$', line.strip(), re.IGNORECASE):
+                is_new_episode = True
+            # 5. 数字+标题格式: 第X 标题
+            elif re.search(r'^\s*第\s*\d+\s+\S', line.strip(), re.IGNORECASE):
+                is_new_episode = True
+            # 6. 直接数字格式: X集
+            elif re.search(r'^\s*\d+\s*集', line.strip(), re.IGNORECASE):
+                is_new_episode = True
+                
+            if is_new_episode:
+                print(f"检测到新集开始: {line}")
+                skip_until_next_episode = False  # 重置跳过标记
+                # 不跳过这一行，继续正常处理
+            else:
+                i += 1  # 跳过这一行
+                continue
             
         # 检测代码块开始和结束
         if line.startswith("```"):
@@ -490,88 +569,76 @@ async def generate_script_pdf(
                 elements.append(Spacer(1, 0.1 * inch))
             in_table = False
             
-        # 匹配集数
-        if '第' in line and '集' in line:
-            # 检查并处理带有**标记的集标题或(完)标记
-            if '**' in line or '(完)' in line:
+        # 匹配集数 - 增强识别能力
+        if ('第' in line and '集' in line) or re.search(r'^\s*\d+\s*集', line.strip()):
+            # 标准格式检查
+            episode_found = False
+            
+            # 检查带有**标记的集标题
+            if '**' in line:
                 # 替换**标记为HTML粗体标签
                 clean_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
                 # 提取集数
-                episode_match = episode_format.search(clean_line)
+                episode_match = episode_format.search(clean_line) or re.search(r'第\s*(\d+)\s*集', clean_line)
                 if episode_match:
-                    # 获取当前集数
-                    new_episode = episode_match.group(1)
+                    current_episode = episode_match.group(1)
+                    processed_episodes.add(current_episode)  # 记录处理的集数
+                    episode_found = True
                     
-                    # 仅在含有"集数："的集数标题前添加分页符
-                    if "集数：" in line or "集数:" in line:
-                        elements.append(PageBreak())
+                    # 添加目录项
+                    toc_entry = f"第{current_episode}集"
+                    toc_entries.append(("episode", toc_entry, len(elements) + 2))  # +2 因为会添加PageBreak和集标题
                     
-                    # 记录新的当前集数
-                    current_episode = new_episode
-                        
+                    elements.append(PageBreak())
                     elements.append(Paragraph(clean_line, styles['ChineseTitle']))
-                    elements.append(Spacer(1, 0.2 * inch))
+                    elements.append(Spacer(1, 0.1 * inch))
+                    print(f"处理新集: 第{current_episode}集")
                     
-                    # 跳过(完)后面可能有的重复内容处理
-                    if '(完)' in line:
-                        # 寻找下一个集数或场次的起始位置
-                        next_section_index = None
-                        for j in range(i+1, len(lines)):
-                            if '第' in lines[j] and '集' in lines[j]:
-                                next_section_index = j
-                                break
-                            if lines[j].strip().startswith('场次'):
-                                next_section_index = j
-                                break
-                        
-                        # 如果找到了下一节，直接跳到那里
-                        if next_section_index is not None:
-                            i = next_section_index
-                            continue
+                    # 每当进入新的集时，重置已处理提示词集合
+                    processed_prompts = set()
             else:
                 # 原来的处理逻辑
-                episode_match = episode_format.search(line)
+                episode_match = episode_format.search(line) or re.search(r'第\s*(\d+)\s*集', line)
                 if episode_match:
-                    # 获取当前集数
-                    new_episode = episode_match.group(1)
+                    current_episode = episode_match.group(1)
+                    processed_episodes.add(current_episode)  # 记录处理的集数
+                    episode_found = True
                     
-                    # 仅在含有"集数："的集数标题前添加分页符
-                    if "集数：" in line or "集数:" in line:
-                        elements.append(PageBreak())
+                    # 添加目录项
+                    toc_entry = f"第{current_episode}集"
+                    toc_entries.append(("episode", toc_entry, len(elements) + 2))  # +2 因为会添加PageBreak和集标题
                     
-                    # 记录新的当前集数
-                    current_episode = new_episode
-                        
+                    elements.append(PageBreak())
                     elements.append(Paragraph(line, styles['ChineseTitle']))
-                    elements.append(Spacer(1, 0.2 * inch))
-            i += 1
-            continue
+                    elements.append(Spacer(1, 0.1 * inch))
+                    print(f"处理新集: 第{current_episode}集")
+                    
+                    # 每当进入新的集时，重置已处理提示词集合
+                    processed_prompts = set()
+                # 处理直接数字格式: X集
+                elif re.search(r'^\s*\d+\s*集', line.strip()):
+                    current_episode = re.search(r'^\s*(\d+)\s*集', line.strip()).group(1)
+                    processed_episodes.add(current_episode)  # 记录处理的集数
+                    episode_found = True
+                    
+                    # 添加目录项
+                    toc_entry = f"第{current_episode}集"
+                    toc_entries.append(("episode", toc_entry, len(elements) + 2))  # +2 因为会添加PageBreak和集标题
+                    
+                    elements.append(PageBreak())
+                    elements.append(Paragraph(line, styles['ChineseTitle']))
+                    elements.append(Spacer(1, 0.1 * inch))
+                    print(f"处理新集: 第{current_episode}集（数字格式）")
+                    
+                    # 每当进入新的集时，重置已处理提示词集合
+                    processed_prompts = set()
+            
+            if episode_found:
+                i += 1
+                continue
         
         # 处理场次行
         elif line.strip().startswith('场次'):
-            # 检查之前是否处理过(完)标记
-            is_after_completion = False
-            for j in range(i-1, -1, -1):
-                if j >= 0 and '(完)' in lines[j]:
-                    is_after_completion = True
-                    break
-                # 如果遇到新的集数标记，中断向前查找
-                if j >= 0 and ('第' in lines[j] and '集' in lines[j]):
-                    break
-            
-            # 如果是(完)后的内容且没有新集数标记，可能是重复内容，跳过
-            if is_after_completion:
-                # 查找下一个集数标记
-                next_episode_index = None
-                for j in range(i+1, len(lines)):
-                    if '第' in lines[j] and '集' in lines[j]:
-                        next_episode_index = j
-                        break
-                
-                if next_episode_index is not None:
-                    i = next_episode_index
-                    continue
-            
             # 检查是否有粗体标记
             if '**' in line:
                 # 替换星号为HTML粗体标签
@@ -581,20 +648,12 @@ async def generate_script_pdf(
             scene_match = scene_format.search(line)
             if scene_match:
                 current_scene = scene_match.group(1)
-                
-                # 规范化场次编号 - 确保场次编号第一部分与当前集数一致
-                if current_episode is not None and '-' in current_scene:
-                    scene_parts = current_scene.split('-')
-                    if len(scene_parts) == 2 and int(scene_parts[0]) != current_episode:
-                        # 修正场次编号的第一部分为当前集数
-                        original_scene = current_scene
-                        current_scene = f"{current_episode}-{scene_parts[1]}"
-                        
-                        # 修改显示的场次文本，替换原始场次编号为规范化的编号
-                        line = line.replace(f"场次{original_scene}", f"场次{current_scene}")
-                        print(f"规范化场次编号: 原编号={original_scene}, 新编号={current_scene} (属于第{current_episode}集)")
-                
                 # 记录场次
+                # 添加目录项
+                if current_episode:
+                    toc_entry = f"场次{current_scene}"
+                    toc_entries.append(("scene", toc_entry, len(elements)))
+                
                 elements.append(Paragraph(line, styles['ChineseScene']))
                 print(f"识别到场次: {current_scene}")
             else:
@@ -606,17 +665,10 @@ async def generate_script_pdf(
                         # 如果有多个数字，尝试组合成类似"1-2"的格式
                         current_scene = f"{numbers[0]}-{numbers[1]}"
                     
-                    # 规范化场次编号
-                    if current_episode is not None and '-' in current_scene:
-                        scene_parts = current_scene.split('-')
-                        if len(scene_parts) == 2 and int(scene_parts[0]) != current_episode:
-                            # 修正场次编号的第一部分为当前集数
-                            original_scene = current_scene
-                            current_scene = f"{current_episode}-{scene_parts[1]}"
-                            # 修改显示的场次文本
-                            line = line.replace(f"场次{original_scene}", f"场次{current_scene}")
-                            line = line.replace(original_scene, current_scene)
-                            print(f"规范化场次编号: 原编号={original_scene}, 新编号={current_scene} (属于第{current_episode}集)")
+                    # 添加目录项
+                    if current_episode:
+                        toc_entry = f"场次{current_scene}"
+                        toc_entries.append(("scene", toc_entry, len(elements)))
                     
                     elements.append(Paragraph(line, styles['ChineseScene']))
                     print(f"从文本中提取场次: {current_scene}")
@@ -629,36 +681,24 @@ async def generate_script_pdf(
         
         # 处理提示词（画面描述词）并直接显示其对应图片
         elif line.startswith('#'):
-            # 检查是否在(完)标记之后
-            is_after_completion = False
-            for j in range(i-1, -1, -1):
-                if j >= 0 and '(完)' in lines[j]:
-                    is_after_completion = True
-                    break
-                # 如果遇到新的集数标记，中断向前查找
-                if j >= 0 and ('第' in lines[j] and '集' in lines[j]):
-                    break
-            
-            # 跟踪已添加的图片，防止重复
-            image_key = f"{current_episode}_{current_scene}_{line}"
-            # 创建一个集合存储已处理的图片关键字，如果不存在则创建
-            if not hasattr(generate_script_pdf, 'processed_images'):
-                generate_script_pdf.processed_images = set()
-            
-            # 检查当前图片是否已经处理过
-            if image_key in generate_script_pdf.processed_images:
-                print(f"跳过已处理的图片: {image_key}")
-                i += 1
-                continue
-            
-            # 如果是(完)后的内容且没有新集数标记，可能是重复内容，跳过
-            if is_after_completion:
-                i += 1
-                continue
-                
             # 添加提示词文本
             clean_prompt = line.replace('#', '').strip()
             if clean_prompt:
+                # 生成提示词的唯一标识，避免重复处理
+                prompt_key = f"{current_episode}_{current_scene}_{clean_prompt}"
+                
+                # 检查是否已处理过该提示词
+                if prompt_key in processed_prompts:
+                    print(f"跳过已处理的提示词: {prompt_key}")
+                    i += 1
+                    continue
+                
+                # 标记该提示词已处理
+                processed_prompts.add(prompt_key)
+                
+                # 移除提示词显示
+                # elements.append(Paragraph(f"提示词: {clean_prompt}", styles['ChinesePrompt']))
+                
                 # 如果当前已识别场次和集数，尝试查找对应图片
                 if current_episode is not None and current_scene is not None:
                     # 新的提示词索引计算方法：基于当前场次
@@ -700,46 +740,15 @@ async def generate_script_pdf(
                     if image_dir and os.path.exists(image_dir):
                         # 构建本地图片文件名格式
                         episode_formatted = f"第{current_episode}集"
-                        
-                        # 规范化场次编号
-                        if '-' in current_scene:
-                            scene_parts = current_scene.split('-')
-                            if len(scene_parts) == 2 and int(scene_parts[0]) != current_episode:
-                                # 修正场次编号，确保第一部分与集数一致
-                                current_scene = f"{current_episode}-{scene_parts[1]}"
-                                print(f"查找图片时规范化场次编号为: {current_scene}")
-                        
                         scene_formatted = f"场次{current_scene}"
-                        
-                        # 尝试两种不同的场次编号格式查找图片
-                        original_scene_format = None
-                        if '-' in current_scene:
-                            scene_parts = current_scene.split('-')
-                            if len(scene_parts) == 2:
-                                # 也尝试查找原始编号格式的图片
-                                original_scene_format = f"场次{scene_parts[0]}-{scene_parts[1]}"
-                                if original_scene_format != scene_formatted:
-                                    print(f"将同时尝试两种场次格式查找图片: {scene_formatted} 和 {original_scene_format}")
                         
                         # 1. 首先尝试精确匹配 - 当前提示词索引
                         images_found = False
                         for img_idx in range(4):  # 最多预期4张图片
-                            # 尝试规范化的场次格式
                             local_img_path = os.path.join(
                                 image_dir, 
                                 f"{episode_formatted}_{scene_formatted}_{prompt_idx}_img{img_idx}.png"
                             )
-                            
-                            # 如果未找到且存在原始场次格式，也尝试使用原始格式
-                            if not os.path.exists(local_img_path) and original_scene_format:
-                                alt_img_path = os.path.join(
-                                    image_dir, 
-                                    f"{episode_formatted}_{original_scene_format}_{prompt_idx}_img{img_idx}.png"
-                                )
-                                if os.path.exists(alt_img_path):
-                                    local_img_path = alt_img_path
-                                    print(f"使用原始场次格式找到图片: {alt_img_path}")
-                            
                             if os.path.exists(local_img_path):
                                 image_paths.append(local_img_path)
                                 images_found = True
@@ -751,19 +760,9 @@ async def generate_script_pdf(
                             candidate_groups = {}
                             
                             # 扫描目录中所有图片，找出当前场景的所有图片
-                            scene_patterns = [f"{episode_formatted}_{scene_formatted}_"]
-                            if original_scene_format:
-                                scene_patterns.append(f"{episode_formatted}_{original_scene_format}_")
-                                
+                            scene_pattern = f"{episode_formatted}_{scene_formatted}_"
                             for filename in os.listdir(image_dir):
-                                # 检查文件是否匹配任一场景模式
-                                matches_pattern = False
-                                for pattern in scene_patterns:
-                                    if filename.startswith(pattern) and filename.endswith(".png"):
-                                        matches_pattern = True
-                                        break
-                                        
-                                if matches_pattern:
+                                if filename.startswith(scene_pattern) and filename.endswith(".png"):
                                     # 从文件名提取索引信息
                                     try:
                                         # 格式: 第X集_场次Y-Z_索引_imgN.png
@@ -814,9 +813,6 @@ async def generate_script_pdf(
                         
                     # 如果成功找到图片，创建一个图片表格
                     if image_paths:
-                        # 记录当前已处理的图片，防止重复添加
-                        generate_script_pdf.processed_images.add(image_key)
-                        
                         max_width = 2.0 * inch  # 每张图片的最大宽度
                         max_height = 2.0 * inch  # 每张图片的最大高度
                         img_objs = []
@@ -1014,10 +1010,35 @@ async def generate_script_pdf(
                     html_content = parse_markdown(line)
                     elements.append(Paragraph(html_content, styles['ChineseNormal']))
             else:
-                # 其他未分类的文本
-                # 处理可能存在的粗体标记
-                if '**' in line:
-                    line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+                # 检查是否是结束标记"(完)"或"第X集(完)"
+                if line.strip() == "(完)" or re.search(r'第\d+集\s*\(完\)', line.strip()):
+                    print(f"检测到剧本结束标记: {line.strip()}")
+                    elements.append(Paragraph(line, styles['ChineseNormal']))
+                    
+                    # 判断是整部剧结束还是当前集结束
+                    if current_episode and re.search(r'第' + re.escape(current_episode) + r'集\s*\(完\)', line.strip()):
+                        print(f"检测到第{current_episode}集结束，等待下一集开始")
+                        skip_until_next_episode = True
+                        # 在设置跳过标记后，清空当前场景和提示词信息，避免重复处理
+                        current_scene = None
+                        processed_prompts = set()  # 清空已处理提示词记录
+                    elif line.strip() == "(完)" and i > 0 and i+1 < len(lines):
+                        # 查看前后文，判断是否是集结束而非整部剧结束
+                        prev_lines = "\n".join(lines[max(0, i-10):i])
+                        next_lines = "\n".join(lines[i+1:min(len(lines), i+20)])
+                        
+                        # 如果前文有当前集信息且后文有新集信息，则认为是当前集结束
+                        if (current_episode and f"第{current_episode}集" in prev_lines) and re.search(r'第\s*\d+\s*集', next_lines):
+                            print(f"从上下文判断第{current_episode}集结束，等待下一集开始")
+                            skip_until_next_episode = True
+                            # 在设置跳过标记后，清空当前场景和提示词信息，避免重复处理
+                            current_scene = None
+                            processed_prompts = set()  # 清空已处理提示词记录
+                        else:
+                            print("检测到整部剧本结束标记")
+                    
+                    i += 1
+                    continue
                 
                 elements.append(Paragraph(line, styles['ChineseNormal']))
             i += 1
@@ -1028,8 +1049,85 @@ async def generate_script_pdf(
             if '**' in line:
                 line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
             
+            # 检查是否是结束标记"(完)"或"第X集(完)"
+            if line.strip() == "(完)" or re.search(r'第\d+集\s*\(完\)', line.strip()):
+                print(f"检测到剧本结束标记: {line.strip()}")
+                elements.append(Paragraph(line, styles['ChineseNormal']))
+                
+                # 判断是整部剧结束还是当前集结束
+                if current_episode and re.search(r'第' + re.escape(current_episode) + r'集\s*\(完\)', line.strip()):
+                    print(f"检测到第{current_episode}集结束，等待下一集开始")
+                    skip_until_next_episode = True
+                    # 在设置跳过标记后，清空当前场景和提示词信息，避免重复处理
+                    current_scene = None
+                    processed_prompts = set()  # 清空已处理提示词记录
+                elif line.strip() == "(完)" and i > 0 and i+1 < len(lines):
+                    # 查看前后文，判断是否是集结束而非整部剧结束
+                    prev_lines = "\n".join(lines[max(0, i-10):i])
+                    next_lines = "\n".join(lines[i+1:min(len(lines), i+20)])
+                    
+                    # 如果前文有当前集信息且后文有新集信息，则认为是当前集结束
+                    if (current_episode and f"第{current_episode}集" in prev_lines) and re.search(r'第\s*\d+\s*集', next_lines):
+                        print(f"从上下文判断第{current_episode}集结束，等待下一集开始")
+                        skip_until_next_episode = True
+                        # 在设置跳过标记后，清空当前场景和提示词信息，避免重复处理
+                        current_scene = None
+                        processed_prompts = set()  # 清空已处理提示词记录
+                    else:
+                        print("检测到整部剧本结束标记")
+                
+                i += 1
+                continue
+            
             elements.append(Paragraph(line, styles['ChineseNormal']))
             i += 1
+    
+    # 处理完成后添加汇总信息
+    if processed_episodes:
+        print(f"已处理的集数: {sorted(list(processed_episodes))}")
+        if all_episodes - processed_episodes:
+            print(f"警告: 以下集数可能未被处理: {sorted(list(all_episodes - processed_episodes))}")
+    else:
+        print("警告: 未处理任何明确的集数")
+    
+    # 在开始处添加目录
+    if toc_entries:
+        toc_elements = []
+        # 添加标题页
+        toc_elements.append(Paragraph(f"{title} - 剧本与场景图", styles['ChineseTitle']))
+        toc_elements.append(Spacer(1, 0.25 * inch))
+        
+        # 添加目录标题
+        toc_elements.append(Paragraph("目录", styles['TOC_Title']))
+        toc_elements.append(Spacer(1, 0.1 * inch))
+        
+        # 分类整理目录项
+        episodes = {}
+        for item_type, entry, page_num in toc_entries:
+            if item_type == "episode":
+                episodes[entry] = []
+            elif item_type == "scene" and episodes:
+                # 添加到最后一个集的场次列表
+                last_episode = list(episodes.keys())[-1]
+                episodes[last_episode].append((entry, page_num))
+        
+        # 为每个目录项生成带有点线的段落
+        for episode, scenes in episodes.items():
+            # 添加集标题
+            toc_elements.append(Paragraph(episode, styles['TOC_Section']))
+            
+            # 添加该集的场次
+            for scene, page_num in scenes:
+                # 创建带有点线和页码的条目
+                entry_text = f'{scene} {"." * 40} {page_num}'
+                toc_elements.append(Paragraph(entry_text, styles['TOC_Entry']))
+        
+        # 添加分页符
+        toc_elements.append(PageBreak())
+        
+        # 将目录元素插入到elements列表的开头
+        # 由于toc_elements中已包含标题页内容，移除elements中的重复内容
+        elements = toc_elements + elements[2:]  # 跳过原来的标题和空白
     
     # 构建PDF
     doc.build(elements)

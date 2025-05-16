@@ -11,6 +11,10 @@ episode_partial_contents = {}  # 保存每个任务每一集的部分生成内�
 
 def save_generation_state(task_id, current_episode, full_script):
     """保存生成状态到内存和文件"""
+    # 确保script_content是UTF-8编码的字符串
+    if isinstance(full_script, bytes):
+        full_script = full_script.decode('utf-8')
+        
     state = {
         "current_episode": current_episode,
         "full_script": full_script,
@@ -34,7 +38,11 @@ def load_generation_state(task_id):
     """加载生成状态"""
     # 先尝试从内存加载
     if task_id in generation_states:
-        return generation_states[task_id]
+        state = generation_states[task_id]
+        # 确保script是UTF-8字符串
+        if "full_script" in state and isinstance(state["full_script"], bytes):
+            state["full_script"] = state["full_script"].decode('utf-8')
+        return state
     
     # 内存中没有，尝试从文件加载
     state_file = os.path.join(GENERATION_STATES_DIR, f"{task_id}.pkl")
@@ -43,6 +51,9 @@ def load_generation_state(task_id):
         if os.path.exists(state_file):
             with open(state_file, "rb") as f:
                 state = pickle.load(f)
+                # 确保script是UTF-8字符串
+                if "full_script" in state and isinstance(state["full_script"], bytes):
+                    state["full_script"] = state["full_script"].decode('utf-8')
                 generation_states[task_id] = state
                 return state
     except Exception as e:
@@ -68,7 +79,11 @@ def find_latest_state_for_any_client():
         
         if latest_file:
             with open(latest_file, "rb") as f:
-                return pickle.load(f)
+                state = pickle.load(f)
+                # 确保script是UTF-8字符串
+                if "full_script" in state and isinstance(state["full_script"], bytes):
+                    state["full_script"] = state["full_script"].decode('utf-8')
+                return state
     except Exception as e:
         print(f"查找最新状态出错: {str(e)}")
     
@@ -76,6 +91,10 @@ def find_latest_state_for_any_client():
 
 def save_partial_content(task_id, episode, content):
     """保存部分生成内容到文件和内存"""
+    # 确保content是UTF-8编码的字符串
+    if isinstance(content, bytes):
+        content = content.decode('utf-8')
+        
     # 保存到内存
     key = f"{task_id}_{episode}"
     episode_partial_contents[key] = content
@@ -104,7 +123,11 @@ def get_partial_content(task_id, episode):
     # 先尝试从内存获取
     key = f"{task_id}_{episode}"
     if key in episode_partial_contents:
-        return episode_partial_contents[key]
+        content = episode_partial_contents[key]
+        # 确保返回UTF-8字符串
+        if isinstance(content, bytes):
+            content = content.decode('utf-8')
+        return content
     
     # 再尝试从文件系统获取
     file_path = os.path.join(PARTIAL_CONTENTS_DIR, f"{task_id}_{episode}.txt")

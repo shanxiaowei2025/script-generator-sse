@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request, BackgroundTasks, status
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 import asyncio
 import json
@@ -7,6 +7,8 @@ import uuid
 import time
 from typing import Optional, Callable, Awaitable, Any, Dict, List
 import sys
+import os
+import re
 
 from app.core.generator import generate_character_and_directory
 from app.core.generator_part2 import generate_episode
@@ -19,7 +21,7 @@ from app.utils.storage import (
     get_partial_content
 )
 from app.utils.text_utils import extract_scene_prompts as extract_prompts, format_scene_prompts
-from app.core.config import API_KEY, API_URL
+from app.core.config import API_KEY, API_URL, PDFS_DIR, IMAGES_DIR
 from app.utils.runninghub_api import (
     MAX_CONCURRENT_TASKS, 
     call_runninghub_workflow, 
@@ -30,6 +32,8 @@ from app.utils.runninghub_api import (
     cancel_runninghub_task,
     cancelled_task_ids
 )
+from app.utils.pdf_generator import create_script_pdf
+from app.utils.image_downloader import download_images_from_event
 
 # =============================================================================
 # 全局任务队列系统 - 实现多用户任务等待队列
@@ -53,6 +57,12 @@ global_request_metadata = {}  # {request_id: {"total_tasks": n, "task_ids": [...
 
 # 添加一个新的任务映射，用于快速查找属于特定请求的所有RunningHub任务ID
 global_runninghub_tasks = {}  # {request_id: set(runninghub_task_id1, runninghub_task_id2, ...)}
+
+# 用于存储子任务结果的字典
+subtask_results = {}
+
+# 添加一个任务关联存储字典
+script_to_image_task_mapping = {}  # {script_task_id: image_request_id}
 
 # 启动全局工作器
 async def start_global_worker():
@@ -485,6 +495,7 @@ class ExtractScenePromptsRequest(BaseModel):
 class RunningHubProcessRequest(BaseModel):
     task_id: str
     episode: Optional[int] = None
+    auto_download: Optional[bool] = True
 
 class RunningHubTaskStatusRequest(BaseModel):
     task_id: str
@@ -810,7 +821,21 @@ async def stream_extract_scene_prompts(request: ExtractScenePromptsRequest):
             
             # 提取画面描述词
             script_text = state.get("full_script", "")
-            prompts_dict = extract_prompts(script_text)
+            try:
+                prompts_dict = extract_prompts(script_text)
+                
+                # 打印详细提取信息
+                print(f"提取到的画面描述词详情:")
+                for episode, scenes in prompts_dict.items():
+                    scene_count = len(scenes)
+                    prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
+                    print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+            except Exception as e:
+                print(f"提取画面描述词时出错: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                yield format_sse_event("error", {"message": f"提取画面描述词时出错: {str(e)}"})
+                return
             
             # 格式化结果
             formatted_prompts = format_scene_prompts(prompts_dict, request.episode)
@@ -857,6 +882,9 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
     # 从请求体中获取task_id
     script_task_id = request.task_id
     
+    # 是否自动下载图片
+    auto_download = request.auto_download if hasattr(request, 'auto_download') else True
+    
     # 检查存储中是否有对应剧本
     state = load_generation_state(script_task_id)
     if not state:
@@ -871,6 +899,10 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
             request_id = str(uuid.uuid4())
             print(f"创建请求: {request_id}, 剧本ID: {script_task_id}")
             
+            # 保存剧本任务ID和图片请求ID的映射关系
+            script_to_image_task_mapping[script_task_id] = request_id
+            print(f"已创建任务映射: 剧本任务 {script_task_id} -> 图片请求 {request_id}")
+            
             # 创建事件队列并注册到全局字典
             event_queue = asyncio.Queue()
             global_event_queues[request_id] = event_queue
@@ -880,14 +912,21 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
             
             # 提取画面描述词
             script_text = state.get("full_script", "")
-            prompts_dict = extract_prompts(script_text)
-            
-            # 打印详细提取信息
-            print(f"提取到的画面描述词详情:")
-            for episode, scenes in prompts_dict.items():
-                scene_count = len(scenes)
-                prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
-                print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+            try:
+                prompts_dict = extract_prompts(script_text)
+                
+                # 打印详细提取信息
+                print(f"提取到的画面描述词详情:")
+                for episode, scenes in prompts_dict.items():
+                    scene_count = len(scenes)
+                    prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
+                    print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+            except Exception as e:
+                print(f"提取画面描述词时出错: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                yield format_sse_event("error", {"message": f"提取画面描述词时出错: {str(e)}"})
+                return
             
             # 如果指定了特定集数，只处理该集的内容
             if request.episode is not None:
@@ -1009,12 +1048,28 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                                 
                                 # 如果接收到all_tasks_completed但没有收到complete
                                 if "event: all_tasks_completed" in event and "event: complete" not in event:
-                                    yield format_sse_event("complete", {
-                                        "message": "所有任务处理完成",
-                                        "request_id": request_id
-                                    })
+                                    # 检查所有图片下载任务是否完成
+                                    all_downloads_done = True
+                                    if 'download_tasks' in locals() and download_tasks:
+                                        print(f"检查{len(download_tasks)}个图片下载任务状态...")
+                                        # 检查是否所有下载任务都已完成
+                                        for dt in download_tasks:
+                                            if not dt.done():
+                                                all_downloads_done = False
+                                                print(f"等待图片下载任务完成...")
+                                                # 继续等待，不立即发送complete事件
+                                                break
+                                    
+                                    if all_downloads_done:
+                                        print(f"所有图片下载任务已完成，发送complete事件")
+                                        yield format_sse_event("complete", {
+                                            "message": "所有任务和图片下载处理完成",
+                                            "request_id": request_id
+                                        })
+                                        complete_sent = True
                                 
-                                complete_sent = True
+                                if "event: complete" not in event and "event: all_tasks_completed" not in event:
+                                    complete_sent = True
                             
                             # 如果是complete事件，准备结束循环
                             if "event: complete" in event:
@@ -1022,6 +1077,26 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                                 await asyncio.sleep(1)
                                 print(f"收到complete事件，结束事件流")
                                 break
+                        
+                        # 检查是否是subtask_completed事件，如果是并且自动下载设置为True，则下载图片
+                        if auto_download and "event: subtask_completed" in event:
+                            try:
+                                # 解析事件数据
+                                event_data = json.loads(event.split("data: ")[1])
+                                print(f"收到子任务完成事件，正在处理图片下载: {event_data.get('task_id')}")
+                                
+                                # 异步下载图片，不阻塞主流程
+                                download_task = asyncio.create_task(
+                                    download_and_report_images(event_data, event_queue)
+                                )
+                                
+                                # 将下载任务添加到跟踪列表
+                                if 'download_tasks' not in locals():
+                                    download_tasks = []
+                                download_tasks.append(download_task)
+                                
+                            except Exception as e:
+                                print(f"处理下载图片时出错: {str(e)}")
                         
                     except asyncio.TimeoutError:
                         # 检查请求的任务进度
@@ -1054,15 +1129,24 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                             print(f"请求 {request_id} 任务状态: 完成={len(completed_tasks)}/{expected_total}, "
                                   f"队列中={len(queued_tasks)}, 处理中={len(processing_tasks)}, "
                                   f"全局队列大小={global_task_queue.qsize()}")
-                            print(f"完成的任务ID: {completed_tasks}")
                             
                             # 判断是否所有任务已完成
                             if len(completed_tasks) == expected_total:
-                                # 所有任务已完成，发送完成事件
-                                if not complete_sent:
-                                    print(f"请求 {request_id} 的所有 {expected_total} 个任务已完成，发送完成事件")
+                                # 检查所有图片下载任务是否完成
+                                all_downloads_done = True
+                                if 'download_tasks' in locals() and download_tasks:
+                                    # 检查是否所有下载任务都已完成
+                                    for dt in download_tasks:
+                                        if not dt.done():
+                                            all_downloads_done = False
+                                            print(f"等待图片下载任务完成...")
+                                            break
+                                
+                                # 所有任务和下载都已完成，发送完成事件
+                                if all_downloads_done and not complete_sent:
+                                    print(f"请求 {request_id} 的所有 {expected_total} 个任务和图片下载已完成，发送完成事件")
                                     yield format_sse_event("complete", {
-                                        "message": "所有任务处理完成",
+                                        "message": "所有任务和图片下载处理完成",
                                         "request_id": request_id,
                                         "completed_tasks": len(completed_tasks),
                                         "total_tasks": expected_total
@@ -1078,11 +1162,21 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                             completed_tasks = [t for t in request_tasks if t["status"] in ["COMPLETED", "ERROR"]]
                             
                             if request_tasks and completed_tasks and len(completed_tasks) == len(request_tasks):
+                                # 检查所有图片下载任务是否完成
+                                all_downloads_done = True
+                                if 'download_tasks' in locals() and download_tasks:
+                                    # 检查是否所有下载任务都已完成
+                                    for dt in download_tasks:
+                                        if not dt.done():
+                                            all_downloads_done = False
+                                            print(f"备用方法：等待图片下载任务完成...")
+                                            break
+                                
                                 # 所有任务已完成，发送完成事件
-                                if not complete_sent:
+                                if all_downloads_done and not complete_sent:
                                     print(f"警告：使用备用方法判断请求 {request_id} 完成状态")
                                     yield format_sse_event("complete", {
-                                        "message": "所有任务处理完成",
+                                        "message": "所有任务和图片下载处理完成",
                                         "request_id": request_id,
                                         "completed_tasks": len(completed_tasks),
                                         "total_tasks": len(request_tasks)
@@ -1440,9 +1534,556 @@ async def cancel_runninghub_task_route(request: RunningHubTaskCancelRequest):
         "debug_info": debug_info
     }
 
+# @router.get("/collect-task-images/{request_id}")
+async def collect_task_images(request_id: str):
+    """收集与请求ID相关的所有子任务图片URL"""
+    print(f"开始收集任务 {request_id} 的图片URL")
+    
+    collected_images = {
+        "request_id": request_id,
+        "episodes": {}
+    }
+    
+    # 方法1: 从subtask_results中收集
+    print(f"方法1: 从subtask_results中收集图片")
+    related_tasks = []
+    for task_id, task_data in subtask_results.items():
+        if task_id.startswith(request_id):
+            related_tasks.append(task_data)
+            print(f"找到关联任务: {task_id}")
+    
+    print(f"从subtask_results找到 {len(related_tasks)} 个相关任务")
+    
+    # 处理每个任务的图片URL
+    for task in related_tasks:
+        if "result" in task and "episode" in task["result"] and "results" in task["result"]:
+            episode = task["result"]["episode"]
+            print(f"处理第 {episode} 集的数据")
+            
+            if episode not in collected_images["episodes"]:
+                collected_images["episodes"][episode] = {}
+            
+            for scene, prompts in task["result"]["results"].items():
+                print(f"  处理场次 {scene}")
+                
+                if scene not in collected_images["episodes"][episode]:
+                    collected_images["episodes"][episode][scene] = {}
+                
+                for prompt_idx, prompt_data in prompts.items():
+                    print(f"    处理提示词 {prompt_idx}")
+                    
+                    if "final_result" in prompt_data and "data" in prompt_data["final_result"]:
+                        image_urls = []
+                        for item in prompt_data["final_result"]["data"]:
+                            if "fileUrl" in item:
+                                image_urls.append(item["fileUrl"])
+                                print(f"      找到图片URL: {item['fileUrl'][:50]}...")
+                        
+                        collected_images["episodes"][episode][scene][prompt_idx] = {
+                            "prompt": prompt_data.get("prompt", ""),
+                            "image_urls": image_urls
+                        }
+    
+    # 方法2: 如果没有找到足够的图片，尝试从global_tasks_status中收集
+    if not any(collected_images["episodes"].values()):
+        print(f"方法2: 从global_tasks_status中收集图片")
+        # 查找所有与该request_id相关的任务
+        related_tasks_ids = []
+        
+        for subtask_id, task_info in global_tasks_status.items():
+            if (subtask_id.startswith(request_id) or 
+                task_info.get("request_id") == request_id):
+                related_tasks_ids.append(subtask_id)
+        
+        print(f"从global_tasks_status找到 {len(related_tasks_ids)} 个相关任务")
+        
+        # 处理每个任务
+        for subtask_id in related_tasks_ids:
+            task_info = global_tasks_status[subtask_id]
+            # 检查是否是已完成的任务
+            if task_info.get("status") == "COMPLETED" and "result" in task_info:
+                result = task_info["result"]
+                
+                # 从任务数据中提取集数和场次信息
+                if "task_data" in task_info:
+                    task_data = task_info["task_data"]
+                    episode_key = task_data.get("episode")
+                    scene_key = task_data.get("scene")
+                    prompt_index = task_data.get("prompt_index")
+                    
+                    if episode_key and scene_key and prompt_index is not None:
+                        # 从结果中提取图片URL
+                        if "final_result" in result and "data" in result["final_result"]:
+                            data_items = result["final_result"]["data"]
+                            image_urls = []
+                            
+                            for item in data_items:
+                                if isinstance(item, dict) and "fileUrl" in item:
+                                    image_urls.append(item["fileUrl"])
+                                    print(f"      找到图片URL: {item['fileUrl'][:50]}...")
+                            
+                            # 只有在找到图片URL时才添加
+                            if image_urls:
+                                # 初始化数据结构
+                                if episode_key not in collected_images["episodes"]:
+                                    collected_images["episodes"][episode_key] = {}
+                                if scene_key not in collected_images["episodes"][episode_key]:
+                                    collected_images["episodes"][episode_key][scene_key] = {}
+                                
+                                collected_images["episodes"][episode_key][scene_key][str(prompt_index)] = {
+                                    "prompt": task_data.get("prompt", ""),
+                                    "image_urls": image_urls
+                                }
+    
+    # 方法3: 检查是否task_id对应的是请求ID而不是任务ID
+    if not any(collected_images["episodes"].values()):
+        print(f"方法3: 尝试检查global_runninghub_tasks")
+        if request_id in global_runninghub_tasks:
+            runninghub_task_ids = global_runninghub_tasks[request_id]
+            print(f"在global_runninghub_tasks找到 {len(runninghub_task_ids)} 个RunningHub任务ID")
+            
+            # 根据RunningHub任务ID去查找相关子任务
+            for task_id in runninghub_task_ids:
+                print(f"处理RunningHub任务ID: {task_id}")
+                if task_id != "CANCELLED_REQUEST":  # 跳过取消标记
+                    # 可以尝试直接查询RunningHub API获取任务结果
+                    try:
+                        result = await query_task_result(task_id)
+                        print(f"查询RunningHub任务 {task_id} 的结果: {result}")
+                        # 解析结果并提取图片URL
+                        # 这里需要根据API的返回格式进行具体实现
+                    except Exception as e:
+                        print(f"查询RunningHub任务结果出错: {str(e)}")
+    
+    # 打印收集的总结果
+    episode_count = len(collected_images["episodes"])
+    total_images = sum(
+        len(prompt_data.get("image_urls", []))
+        for ep_data in collected_images["episodes"].values()
+        for scene_data in ep_data.values()
+        for prompt_data in scene_data.values()
+    )
+    
+    print(f"收集完成，共找到 {episode_count} 集, {total_images} 张图片")
+    return collected_images
+
+# 创建任务关联API
+# @router.get("/link-tasks/{script_task_id}/{image_request_id}")
+async def link_script_and_image_tasks(script_task_id: str, image_request_id: str):
+    """关联剧本生成任务和图片生成任务"""
+    script_to_image_task_mapping[script_task_id] = image_request_id
+    print(f"手动关联任务: 剧本任务 {script_task_id} -> 图片请求 {image_request_id}")
+    return {
+        "status": "success", 
+        "message": f"已关联剧本任务 {script_task_id} 和图片请求 {image_request_id}"
+    }
+
+# 查询任务关联API
+# @router.get("/get-linked-tasks/{script_task_id}")
+async def get_linked_tasks(script_task_id: str):
+    """获取关联的图片生成任务ID"""
+    image_request_id = script_to_image_task_mapping.get(script_task_id)
+    if not image_request_id:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            content={"status": "error", "message": f"未找到与剧本任务 {script_task_id} 关联的图片请求"}
+        )
+    return {"script_task_id": script_task_id, "image_request_id": image_request_id}
+
 def format_sse_event(event_type: str, data: Any) -> str:
     """格式化SSE事件"""
     json_data = json.dumps(data, ensure_ascii=False)
-    return f"event: {event_type}\ndata: {json_data}\n\n" 
+    return f"event: {event_type}\ndata: {json_data}\n\n"
+
+# PDF生成和下载路由
+# @router.get("/generate-script-pdf/{task_id}")
+async def generate_script_pdf(task_id: str):
+    """
+    生成剧本PDF文件并提供下载
+    如果文件已存在则直接返回，避免重复生成
+    
+    Args:
+        task_id: 剧本任务ID
+    """
+    try:
+        print(f"开始处理PDF下载请求，剧本任务ID: {task_id}")
+        
+        # 加载剧本内容
+        script_state = load_generation_state(task_id)
+        if not script_state:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": f"找不到任务ID: {task_id} 的剧本内容"}
+            )
+        
+        script_content = script_state.get("full_script", "")
+        if not script_content:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": "剧本内容为空"}
+            )
+        
+        # 确定使用哪个图片目录
+        image_folder_id = None
+        
+        # 策略1：首先检查对应剧本任务ID的图片目录是否存在
+        direct_image_path = os.path.join(IMAGES_DIR, task_id)
+        if os.path.exists(direct_image_path) and os.path.isdir(direct_image_path):
+            print(f"找到直接匹配的图片目录: {task_id}")
+            image_folder_id = task_id
+        else:
+            # 策略2：查找关联的图片请求ID
+            image_request_id = script_to_image_task_mapping.get(task_id)
+            if image_request_id:
+                request_image_path = os.path.join(IMAGES_DIR, image_request_id)
+                if os.path.exists(request_image_path) and os.path.isdir(request_image_path):
+                    print(f"找到关联图片目录: {image_request_id}")
+                    image_folder_id = image_request_id
+                else:
+                    print(f"关联图片目录不存在: {request_image_path}")
+            else:
+                print(f"未找到关联的图片请求ID")
+            
+            # 策略3：查找任何可能相关的目录
+            if not image_folder_id:
+                print(f"尝试查找包含任务ID部分内容的图片目录")
+                for dir_name in os.listdir(IMAGES_DIR):
+                    dir_path = os.path.join(IMAGES_DIR, dir_name)
+                    if os.path.isdir(dir_path) and task_id in dir_name:
+                        print(f"找到相关目录: {dir_name}")
+                        image_folder_id = dir_name
+                        break
+        
+        # 如果找到了图片目录，使用该目录；否则使用剧本任务ID（即使目录不存在）
+        final_image_id = image_folder_id if image_folder_id else task_id
+        print(f"最终使用的图片目录ID: {final_image_id}")
+        
+        # 提取剧名，用于生成文件名
+        title_match = re.search(r'剧名：《(.+?)》', script_content)
+        title = title_match.group(1) if title_match else "未命名剧本"
+        
+        # 构建预期的PDF文件路径
+        expected_pdf_filename = f"{title}_{final_image_id}.pdf"
+        expected_pdf_path = os.path.join(PDFS_DIR, expected_pdf_filename)
+        
+        # 检查文件是否已存在
+        if os.path.exists(expected_pdf_path):
+            print(f"PDF文件已存在，直接返回文件: {expected_pdf_path}")
+            # 从路径中提取文件名
+            filename = os.path.basename(expected_pdf_path)
+            
+            # 返回文件
+            return FileResponse(
+                path=expected_pdf_path,
+                filename=filename,
+                media_type="application/pdf",
+                background=None
+            )
+        
+        print(f"PDF文件不存在，需要生成: {expected_pdf_path}")
+        
+        # 获取图片数据，用于构建PDF内容
+        image_data = {"episodes": {}}
+        
+        # 使用剧本内容提取需要的图片信息
+        try:
+            # 从剧本中提取集数和场景信息
+            prompts_dict = extract_prompts(script_content)
+            
+            # 构建图片数据结构
+            for episode, scenes in prompts_dict.items():
+                if episode not in image_data["episodes"]:
+                    image_data["episodes"][episode] = {}
+                
+                for scene, prompts in scenes.items():
+                    if scene not in image_data["episodes"][episode]:
+                        image_data["episodes"][episode][scene] = {}
+                    
+                    for idx, prompt in enumerate(prompts):
+                        clean_prompt = prompt.replace('#', '').strip()
+                        if clean_prompt:
+                            image_data["episodes"][episode][scene][str(idx)] = {
+                                "prompt": clean_prompt
+                            }
+        except Exception as e:
+            print(f"提取提示词数据时出错: {str(e)}")
+            # 出错时仍然继续，只是没有提示词信息
+        
+        # 生成PDF文件，指定输出文件名
+        pdf_path = await create_script_pdf(
+            task_id=final_image_id,  # 使用确定的图片目录ID
+            script_content=script_content,
+            image_data=image_data["episodes"],
+            output_dir=PDFS_DIR,
+            filename=expected_pdf_filename  # 使用预期的文件名
+        )
+        
+        print(f"PDF生成成功，文件路径: {pdf_path}")
+        
+        # 从路径中提取文件名
+        filename = os.path.basename(pdf_path)
+        
+        # 返回文件
+        return FileResponse(
+            path=pdf_path,
+            filename=filename,
+            media_type="application/pdf",
+            background=None
+        )
+        
+    except Exception as e:
+        # 输出详细错误信息以便调试
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"PDF生成出错: {str(e)}\n{error_details}")
+        
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"生成PDF出错: {str(e)}"
+            }
+        )
+
+# 图片下载和报告函数
+async def download_and_report_images(event_data: Dict[str, Any], event_queue: asyncio.Queue):
+    """下载事件中的图片并报告下载结果"""
+    try:
+        # 记录开始时间
+        start_time = time.time()
+        task_id = event_data.get('task_id')
+        print(f"开始下载图片: 任务ID = {task_id}")
+        
+        # 查找关联的脚本任务ID
+        script_task_id = None
+        
+        # 从事件数据中提取request_id
+        # 首先尝试从task_id中获取，因为子任务ID通常格式为：请求ID_集数_场景_提示词索引
+        if task_id and '_' in task_id:
+            request_id = task_id.split('_')[0]
+            print(f"从任务ID中提取请求ID: {request_id}")
+            
+            # 反向查找脚本任务ID
+            for script_id, img_request_id in script_to_image_task_mapping.items():
+                if img_request_id == request_id:
+                    script_task_id = script_id
+                    print(f"找到关联的脚本任务ID: {script_task_id}")
+                    break
+        
+        # 如果任务ID中没有找到请求ID，从全局状态尝试获取
+        if not script_task_id and task_id in global_tasks_status:
+            task_info = global_tasks_status.get(task_id, {})
+            request_id = task_info.get("request_id")
+            if request_id:
+                print(f"从全局状态找到请求ID: {request_id}")
+                # 反向查找脚本任务ID
+                for script_id, img_request_id in script_to_image_task_mapping.items():
+                    if img_request_id == request_id:
+                        script_task_id = script_id
+                        print(f"找到关联的脚本任务ID: {script_task_id}")
+                        break
+        
+        # 下载图片，传入脚本任务ID
+        download_result = await download_images_from_event(event_data, script_task_id=script_task_id)
+        
+        # 计算下载耗时
+        elapsed = time.time() - start_time
+        
+        # 为下载结果添加耗时信息
+        download_result["download_time"] = f"{elapsed:.2f}秒"
+        
+        # 通过事件队列报告下载结果
+        if event_queue:
+            await event_queue.put(format_sse_event("image_download_complete", {
+                "task_id": task_id,
+                "script_task_id": script_task_id,
+                "download_result": download_result,
+                "message": f"已完成图片下载，共下载{download_result.get('download_result', {}).get('total_downloaded', 0)}张图片，耗时{elapsed:.2f}秒"
+            }))
+        
+        print(f"图片下载完成: 任务ID = {task_id}, 脚本任务ID = {script_task_id}, 下载{download_result.get('download_result', {}).get('total_downloaded', 0)}张图片, 耗时{elapsed:.2f}秒")
+        
+        # 保存下载结果到subtask_results中
+        subtask_id = task_id
+        if subtask_id in global_tasks_status:
+            task_info = global_tasks_status[subtask_id]
+            if "result" in task_info:
+                task_info["result"]["download_result"] = download_result
+            
+            print(f"已将下载结果保存到任务状态: {subtask_id}")
+        
+    except Exception as e:
+        print(f"下载图片期间出错: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+
+# PDF生成路由 - 仅返回文件路径
+@router.get("/generate-script-pdf-path/{task_id}")
+async def generate_script_pdf_path(task_id: str):
+    """
+    生成剧本PDF文件并返回文件路径
+    如果文件已存在则直接返回路径，避免重复生成
+    
+    Args:
+        task_id: 剧本任务ID
+        
+    Returns:
+        JSON对象，包含PDF文件路径
+    """
+    try:
+        print(f"开始处理PDF路径请求，剧本任务ID: {task_id}")
+        
+        # 加载剧本内容
+        script_state = load_generation_state(task_id)
+        if not script_state:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": f"找不到任务ID: {task_id} 的剧本内容"}
+            )
+        
+        script_content = script_state.get("full_script", "")
+        if not script_content:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": "剧本内容为空"}
+            )
+        
+        # 确定使用哪个图片目录
+        image_folder_id = None
+        
+        # 策略1：首先检查对应剧本任务ID的图片目录是否存在
+        direct_image_path = os.path.join(IMAGES_DIR, task_id)
+        if os.path.exists(direct_image_path) and os.path.isdir(direct_image_path):
+            print(f"找到直接匹配的图片目录: {task_id}")
+            image_folder_id = task_id
+        else:
+            # 策略2：查找关联的图片请求ID
+            image_request_id = script_to_image_task_mapping.get(task_id)
+            if image_request_id:
+                request_image_path = os.path.join(IMAGES_DIR, image_request_id)
+                if os.path.exists(request_image_path) and os.path.isdir(request_image_path):
+                    print(f"找到关联图片目录: {image_request_id}")
+                    image_folder_id = image_request_id
+                else:
+                    print(f"关联图片目录不存在: {request_image_path}")
+            else:
+                print(f"未找到关联的图片请求ID")
+            
+            # 策略3：查找任何可能相关的目录
+            if not image_folder_id:
+                print(f"尝试查找包含任务ID部分内容的图片目录")
+                for dir_name in os.listdir(IMAGES_DIR):
+                    dir_path = os.path.join(IMAGES_DIR, dir_name)
+                    if os.path.isdir(dir_path) and task_id in dir_name:
+                        print(f"找到相关目录: {dir_name}")
+                        image_folder_id = dir_name
+                        break
+        
+        # 如果找到了图片目录，使用该目录；否则使用剧本任务ID（即使目录不存在）
+        final_image_id = image_folder_id if image_folder_id else task_id
+        print(f"最终使用的图片目录ID: {final_image_id}")
+        
+        # 提取剧名，用于生成文件名
+        title_match = re.search(r'剧名：《(.+?)》', script_content)
+        title = title_match.group(1) if title_match else "未命名剧本"
+        
+        # 构建预期的PDF文件路径
+        expected_pdf_filename = f"{title}_{final_image_id}.pdf"
+        expected_pdf_path = os.path.join(PDFS_DIR, expected_pdf_filename)
+        
+        # 检查文件是否已存在
+        if os.path.exists(expected_pdf_path):
+            print(f"PDF文件已存在，直接返回路径: {expected_pdf_path}")
+            # 从路径中提取文件名
+            filename = os.path.basename(expected_pdf_path)
+            # 构建相对路径
+            relative_path = f"/storage/pdfs/{filename}"
+            
+            # 返回文件路径信息
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "status": "success",
+                    "message": "PDF文件已存在",
+                    "data": {
+                        "filename": filename,
+                        "path": relative_path,
+                        "full_path": expected_pdf_path
+                    }
+                }
+            )
+        
+        print(f"PDF文件不存在，需要生成: {expected_pdf_path}")
+        
+        # 获取图片数据，用于构建PDF内容
+        image_data = {"episodes": {}}
+        
+        # 使用剧本内容提取需要的图片信息
+        try:
+            # 从剧本中提取集数和场景信息
+            prompts_dict = extract_prompts(script_content)
+            
+            # 构建图片数据结构
+            for episode, scenes in prompts_dict.items():
+                if episode not in image_data["episodes"]:
+                    image_data["episodes"][episode] = {}
+                
+                for scene, prompts in scenes.items():
+                    if scene not in image_data["episodes"][episode]:
+                        image_data["episodes"][episode][scene] = {}
+                    
+                    for idx, prompt in enumerate(prompts):
+                        clean_prompt = prompt.replace('#', '').strip()
+                        if clean_prompt:
+                            image_data["episodes"][episode][scene][str(idx)] = {
+                                "prompt": clean_prompt
+                            }
+        except Exception as e:
+            print(f"提取提示词数据时出错: {str(e)}")
+            # 出错时仍然继续，只是没有提示词信息
+        
+        # 生成PDF文件
+        pdf_path = await create_script_pdf(
+            task_id=final_image_id,  # 使用确定的图片目录ID
+            script_content=script_content,
+            image_data=image_data["episodes"],
+            output_dir=PDFS_DIR
+        )
+        
+        print(f"PDF生成成功，文件路径: {pdf_path}")
+        
+        # 从路径中提取文件名
+        filename = os.path.basename(pdf_path)
+        
+        # 构建相对于API服务的相对路径（供前端使用）
+        relative_path = f"/storage/pdfs/{filename}"
+        
+        # 返回文件路径信息
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "success",
+                "message": "PDF生成成功",
+                "data": {
+                    "filename": filename,
+                    "path": relative_path,
+                    "full_path": pdf_path
+                }
+            }
+        )
+        
+    except Exception as e:
+        # 输出详细错误信息以便调试
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"PDF生成出错 (path模式): {str(e)}\n{error_details}")
+        
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"生成PDF出错: {str(e)}"
+            }
+        )
 
 

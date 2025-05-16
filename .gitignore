@@ -21,8 +21,7 @@ var/
 *.egg
 
 # 应用存储目录
-app/storage/generation_states/
-app/storage/partial_contents/
+app/storage/
 
 # 临时文件
 *.pkl

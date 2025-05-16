@@ -141,7 +141,15 @@ def extract_scene_prompts(script_text):
                         if current_episode not in prompts_by_episode:
                             prompts_by_episode[current_episode] = {}
                 
-                print(f"处理场次: {current_scene} (属于第{current_episode}集)")
+                # 规范化场次编号 - 确保场次编号第一部分与当前集数一致
+                scene_parts = current_scene.split('-')
+                if len(scene_parts) == 2 and int(scene_parts[0]) != current_episode:
+                    # 修正场次编号的第一部分为当前集数
+                    current_scene = f"{current_episode}-{scene_parts[1]}"
+                    print(f"规范化场次编号: 原编号={scene_match.group(1)}, 新编号={current_scene} (属于第{current_episode}集)")
+                else:
+                    print(f"处理场次: {current_scene} (属于第{current_episode}集)")
+                
                 if current_scene not in prompts_by_episode[current_episode]:
                     prompts_by_episode[current_episode][current_scene] = []
         
@@ -149,6 +157,12 @@ def extract_scene_prompts(script_text):
         elif line.startswith('#') and current_scene is not None:
             # 排除不是真正画面描述词的特殊行
             if not any(excluded in line for excluded in ['# 剧名', '#剧名', '# 集数', '#集数']):
+                # 确保当前集数和场次的列表存在
+                if current_episode not in prompts_by_episode:
+                    prompts_by_episode[current_episode] = {}
+                if current_scene not in prompts_by_episode[current_episode]:
+                    prompts_by_episode[current_episode][current_scene] = []
+                
                 # 保留完整的描述词，包括前导的#符号
                 prompt = line
                 prompts_by_episode[current_episode][current_scene].append(prompt)
