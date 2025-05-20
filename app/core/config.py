@@ -5,6 +5,9 @@ from typing import Optional
 # 加载环境变量
 load_dotenv()
 
+# 基础目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # API设置
 API_KEY = os.getenv("API_KEY", "")
 API_URL = os.getenv("API_URL", "https://vip.apiyi.com/v1/chat/completions")
@@ -19,7 +22,7 @@ DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 MODEL_NAME = os.getenv("MODEL_NAME", "claude-3-7-sonnet-20250219")
 
 # 路径设置
-STORAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "app/storage")
+STORAGE_DIR = os.path.join(BASE_DIR, "app/storage")
 GENERATION_STATES_DIR = os.path.join(STORAGE_DIR, "generation_states")
 PARTIAL_CONTENTS_DIR = os.path.join(STORAGE_DIR, "partial_contents")
 PDFS_DIR = os.path.join(STORAGE_DIR, "pdfs")  # 新增PDF存储目录

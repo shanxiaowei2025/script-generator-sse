@@ -27,7 +27,7 @@ from app.utils.runninghub_api import (
     call_runninghub_workflow, 
     process_scene_prompts, 
     query_task_status, 
-    query_task_result, 
+    query_task_result,
     wait_for_task_completion,
     cancel_runninghub_task,
     cancelled_task_ids
@@ -134,6 +134,10 @@ async def worker_process(worker_id: int):
                     "worker_id": worker_id
                 }
                 
+                # 添加场次信息，便于排查问题
+                if "task_data" in task and "scene" in task["task_data"] and "episode" in task["task_data"]:
+                    print(f"任务详情: 第{task['task_data']['episode']}集 场次{task['task_data']['scene']} 提示词索引{task['task_data']['prompt_index']}")
+                
                 # 发送状态更新
                 await event_queue.put(format_sse_event("status", {
                     "message": f"开始处理任务: 第{task_data['episode']}集 场次{task_data['scene']} 提示词{task_data['prompt_index']}",
@@ -167,6 +171,7 @@ async def worker_process(worker_id: int):
                 
                 # 处理任务
                 print(f"工作协程 #{worker_id + 1} 处理任务: {subtask_id}, 请求ID: {request_id}")
+                
                 try:
                     # 调用RunningHub API
                     prompt = task_data["prompt"]
@@ -830,6 +835,12 @@ async def stream_extract_scene_prompts(request: ExtractScenePromptsRequest):
                     scene_count = len(scenes)
                     prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
                     print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+                    # 添加更详细的场次信息
+                    for scene, prompts in scenes.items():
+                        print(f"    场次{scene}: {len(prompts)}个提示词")
+                        for i, prompt in enumerate(prompts):
+                            clean_prompt = prompt.replace('#', '').strip()
+                            print(f"      [{i}] {clean_prompt[:50]}..." if len(clean_prompt) > 50 else f"      [{i}] {clean_prompt}")
             except Exception as e:
                 print(f"提取画面描述词时出错: {str(e)}")
                 import traceback
@@ -921,6 +932,12 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                     scene_count = len(scenes)
                     prompt_count = sum(len([p for p in prompts if p.replace('#', '').strip()]) for _, prompts in scenes.items())
                     print(f"  第{episode}集: {scene_count}个场景, {prompt_count}个提示词")
+                    # 添加更详细的场次信息
+                    for scene, prompts in scenes.items():
+                        print(f"    场次{scene}: {len(prompts)}个提示词")
+                        for i, prompt in enumerate(prompts):
+                            clean_prompt = prompt.replace('#', '').strip()
+                            print(f"      [{i}] {clean_prompt[:50]}..." if len(clean_prompt) > 50 else f"      [{i}] {clean_prompt}")
             except Exception as e:
                 print(f"提取画面描述词时出错: {str(e)}")
                 import traceback
@@ -949,9 +966,16 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                 # 格式化集数键为"第X集"
                 episode_key = f"第{episode}集" if not str(episode).startswith("第") else str(episode)
                 
-                for scene, prompts in scenes.items():
+                print(f"\n开始添加第{episode}集的任务到队列:")
+                
+                # 按场次编号排序，确保按照顺序处理
+                sorted_scenes = sorted(scenes.keys(), key=lambda x: tuple(map(int, x.split('-'))))
+                for scene in sorted_scenes:
                     # 格式化场景键为"场次X-X"
                     scene_key = f"场次{scene}" if not str(scene).startswith("场次") else str(scene)
+                    
+                    print(f"  处理场次{scene}的提示词:")
+                    prompts = scenes[scene]
                     
                     # 添加有效提示词到队列
                     for idx, prompt in enumerate(prompts):
@@ -972,6 +996,8 @@ async def process_prompts_with_runninghub(request: RunningHubProcessRequest):
                             # 使用确定的格式：请求ID_集数_场景_提示词索引
                             subtask_id = f"{request_id}_{episode}_{scene}_{idx}"
                             request_task_ids.append(subtask_id)
+                            
+                            print(f"    添加任务: {subtask_id} - 提示词: {clean_prompt[:50]}..." if len(clean_prompt) > 50 else f"    添加任务: {subtask_id} - 提示词: {clean_prompt}")
                             
                             # 创建全局任务项
                             task_item = {
@@ -1919,13 +1945,14 @@ async def download_and_report_images(event_data: Dict[str, Any], event_queue: as
 
 # PDF生成路由 - 仅返回文件路径
 @router.get("/generate-script-pdf-path/{task_id}")
-async def generate_script_pdf_path(task_id: str):
+async def generate_script_pdf_path(task_id: str, timeout: Optional[int] = 60):
     """
     生成剧本PDF文件并返回文件路径
     如果文件已存在则直接返回路径，避免重复生成
     
     Args:
         task_id: 剧本任务ID
+        timeout: PDF生成超时时间(秒)，默认60秒
         
     Returns:
         JSON对象，包含PDF文件路径
@@ -1994,24 +2021,44 @@ async def generate_script_pdf_path(task_id: str):
         # 检查文件是否已存在
         if os.path.exists(expected_pdf_path):
             print(f"PDF文件已存在，直接返回路径: {expected_pdf_path}")
-            # 从路径中提取文件名
-            filename = os.path.basename(expected_pdf_path)
-            # 构建相对路径
-            relative_path = f"/storage/pdfs/{filename}"
-            
-            # 返回文件路径信息
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={
-                    "status": "success",
-                    "message": "PDF文件已存在",
-                    "data": {
-                        "filename": filename,
-                        "path": relative_path,
-                        "full_path": expected_pdf_path
-                    }
-                }
-            )
+            # 检查文件是否完整
+            try:
+                with open(expected_pdf_path, 'rb') as f:
+                    # 检查文件大小是否大于0，并尝试读取文件末尾以确保文件完整
+                    f.seek(0, 2)  # 移动到文件末尾
+                    file_size = f.tell()
+                    if file_size > 0:
+                        # 从路径中提取文件名
+                        filename = os.path.basename(expected_pdf_path)
+                        # 构建相对路径
+                        relative_path = f"/storage/pdfs/{filename}"
+                        
+                        # 返回文件路径信息
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={
+                                "status": "success",
+                                "message": "PDF文件已存在",
+                                "data": {
+                                    "filename": filename,
+                                    "path": relative_path,
+                                    "full_path": expected_pdf_path,
+                                    "size": file_size
+                                }
+                            }
+                        )
+                    else:
+                        print(f"文件大小为0，需要重新生成: {expected_pdf_path}")
+                        # 删除零字节文件
+                        os.remove(expected_pdf_path)
+            except Exception as e:
+                print(f"检查文件时出错，可能文件损坏: {str(e)}")
+                # 尝试删除可能损坏的文件
+                try:
+                    os.remove(expected_pdf_path)
+                    print(f"已删除可能损坏的文件: {expected_pdf_path}")
+                except:
+                    pass
         
         print(f"PDF文件不存在，需要生成: {expected_pdf_path}")
         
@@ -2042,35 +2089,59 @@ async def generate_script_pdf_path(task_id: str):
             print(f"提取提示词数据时出错: {str(e)}")
             # 出错时仍然继续，只是没有提示词信息
         
-        # 生成PDF文件
-        pdf_path = await create_script_pdf(
-            task_id=final_image_id,  # 使用确定的图片目录ID
-            script_content=script_content,
-            image_data=image_data["episodes"],
-            output_dir=PDFS_DIR
-        )
-        
-        print(f"PDF生成成功，文件路径: {pdf_path}")
-        
-        # 从路径中提取文件名
-        filename = os.path.basename(pdf_path)
-        
-        # 构建相对于API服务的相对路径（供前端使用）
-        relative_path = f"/storage/pdfs/{filename}"
-        
-        # 返回文件路径信息
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "success",
-                "message": "PDF生成成功",
-                "data": {
-                    "filename": filename,
-                    "path": relative_path,
-                    "full_path": pdf_path
+        # 使用异步任务和超时机制生成PDF
+        try:
+            # 创建任务，并设置超时
+            pdf_path_future = asyncio.create_task(
+                create_script_pdf(
+                    task_id=final_image_id,  # 使用确定的图片目录ID
+                    script_content=script_content,
+                    image_data=image_data["episodes"],
+                    output_dir=PDFS_DIR,
+                    with_progress=True
+                )
+            )
+            
+            # 等待任务完成，增加超时处理
+            pdf_path = await asyncio.wait_for(pdf_path_future, timeout=timeout)
+            
+            print(f"PDF生成成功，文件路径: {pdf_path}")
+            
+            # 从路径中提取文件名
+            filename = os.path.basename(pdf_path)
+            
+            # 构建相对于API服务的相对路径（供前端使用）
+            relative_path = f"/storage/pdfs/{filename}"
+            
+            # 获取文件大小
+            file_size = os.path.getsize(pdf_path) if os.path.exists(pdf_path) else 0
+            
+            # 返回文件路径信息
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "status": "success",
+                    "message": "PDF生成成功",
+                    "data": {
+                        "filename": filename,
+                        "path": relative_path,
+                        "full_path": pdf_path,
+                        "size": file_size
+                    }
                 }
-            }
-        )
+            )
+        except asyncio.TimeoutError:
+            print(f"PDF生成超时 (超过{timeout}秒)")
+            return JSONResponse(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                content={
+                    "status": "error",
+                    "message": f"PDF生成超时 (超过{timeout}秒)，请稍后再试",
+                    "data": {
+                        "expected_path": expected_pdf_path
+                    }
+                }
+            )
         
     except Exception as e:
         # 输出详细错误信息以便调试
@@ -2085,5 +2156,3 @@ async def generate_script_pdf_path(task_id: str):
                 "message": f"生成PDF出错: {str(e)}"
             }
         )
-
-

@@ -124,9 +124,9 @@ def extract_scene_prompts(script_text):
                 if current_episode not in prompts_by_episode:
                     prompts_by_episode[current_episode] = {}
         
-        # 检测场次
-        elif line.startswith('场次') and '：' in line:
-            scene_match = re.search(r'场次(\d+-\d+)：', line)
+        # 检测场次 - 同时支持"场次X-X："和"### 场次X-X："格式
+        elif ('场次' in line) and ('：' in line or ':' in line):
+            scene_match = re.search(r'(?:###\s*)?场次(\d+-\d+)[：:]', line)
             if scene_match:
                 current_scene = scene_match.group(1)
                 
@@ -166,11 +166,47 @@ def extract_scene_prompts(script_text):
                 # 保留完整的描述词，包括前导的#符号
                 prompt = line
                 prompts_by_episode[current_episode][current_scene].append(prompt)
+                print(f"提取到画面描述词: 第{current_episode}集 场次{current_scene} - {prompt[:50]}...")
             else:
-                # print(f"排除特殊行: {line[:30]}...")
+                print(f"排除特殊行: {line[:30]}...")
                 pass
     
-    return prompts_by_episode
+    # 添加统计信息，便于调试
+    total_prompts = 0
+    for episode, scenes in prompts_by_episode.items():
+        ep_count = 0
+        print(f"第{episode}集包含场次:")
+        for scene, prompts in scenes.items():
+            print(f"  场次{scene}: {len(prompts)}个提示词")
+            ep_count += len(prompts)
+            total_prompts += len(prompts)
+        print(f"第{episode}集共有{ep_count}个提示词")
+    print(f"总共提取到{total_prompts}个提示词")
+    
+    # 对每集的场次进行重新编号，确保从1开始连续编号
+    renumbered_prompts = {}
+    for episode, scenes in prompts_by_episode.items():
+        renumbered_prompts[episode] = {}
+        
+        # 直接复制场次，保留原始场次编号的第二部分
+        for original_scene in scenes.keys():
+            # 如果场次包含"-"，确保第一部分与集数一致
+            if '-' in original_scene:
+                scene_parts = original_scene.split('-')
+                if len(scene_parts) == 2 and int(scene_parts[0]) != episode:
+                    # 只修改第一部分为当前集数，保留第二部分原始编号
+                    new_scene = f"{episode}-{scene_parts[1]}"
+                    print(f"规范化场次编号: 原编号={original_scene}, 新编号={new_scene} (属于第{episode}集)")
+                else:
+                    new_scene = original_scene
+            else:
+                # 如果没有"-"格式，直接使用原编号
+                new_scene = original_scene
+                
+            # 复制原场次的提示词到规范化的场次编号下
+            renumbered_prompts[episode][new_scene] = scenes[original_scene]
+    
+    return renumbered_prompts
 
 def format_scene_prompts(prompts_dict, specific_episode=None):
     """

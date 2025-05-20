@@ -14,4 +14,5 @@ reportlab==4.0.9
 markdown==3.5
 html2text==2024.2.26
 beautifulsoup4==4.12.2
-Pillow==10.2.0 
+Pillow==10.2.0
+PyPDF2==3.0.1 
