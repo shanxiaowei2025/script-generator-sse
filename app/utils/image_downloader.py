@@ -1,48 +1,77 @@
 import os
 import aiohttp
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 import aiofiles
 import re
 from urllib.parse import urlparse
 from datetime import datetime
-from app.core.config import IMAGES_DIR
+from app.core.config import IMAGES_DIR, MINIO_ENABLED, SAVE_FILES_LOCALLY
 from app.utils.storage import get_partial_content
 from app.utils.text_utils import extract_scene_prompts
+from app.utils.minio_storage import minio_client, get_image_object_name
 
 # 默认图片保存目录
 DEFAULT_IMAGE_DIR = IMAGES_DIR
 
-async def download_image(url: str, save_path: str) -> str:
+async def download_image(url: str, save_path: str, script_task_id: str = None) -> Tuple[Optional[str], Optional[str]]:
     """
-    下载图片并保存到指定路径
+    下载图片并保存到指定路径，如果启用了MinIO，也会上传到MinIO
     
     Args:
         url: 图片URL
         save_path: 保存路径
+        script_task_id: 脚本任务ID，用于MinIO对象名生成
         
     Returns:
-        str: 图片保存的完整路径
+        Tuple[Optional[str], Optional[str]]: (本地路径, MinIO URL), 均为None表示下载失败
     """
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 if response.status == 200:
-                    # 确保目录存在
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    # 如果需要保存到本地，确保目录存在
+                    if SAVE_FILES_LOCALLY:
+                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
                     
-                    # 保存图片
-                    async with aiofiles.open(save_path, 'wb') as f:
-                        await f.write(await response.read())
+                    # 获取图片数据
+                    image_data = await response.read()
                     
-                    print(f"图片下载成功: {save_path}")
-                    return save_path
+                    # 如果需要保存到本地，执行保存操作
+                    if SAVE_FILES_LOCALLY:
+                        # 保存到本地文件系统
+                        async with aiofiles.open(save_path, 'wb') as f:
+                            await f.write(image_data)
+                        print(f"图片下载成功: {save_path}")
+                    else:
+                        print(f"图片下载成功，不保存本地")
+                    
+                    # 如果启用了MinIO并提供了脚本任务ID，上传到MinIO
+                    minio_url = None
+                    if MINIO_ENABLED and minio_client.is_available() and script_task_id:
+                        image_filename = os.path.basename(save_path)
+                        object_name = get_image_object_name(script_task_id, image_filename)
+                        
+                        # 获取文件类型
+                        content_type = response.headers.get('Content-Type', 'image/png')
+                        
+                        # 上传到MinIO
+                        success, url = minio_client.upload_bytes(image_data, object_name, content_type)
+                        if success:
+                            print(f"图片已上传到MinIO: {object_name}")
+                            minio_url = url
+                        else:
+                            print(f"上传图片到MinIO失败: {url}")
+                    
+                    # 返回本地路径（可能为None）和MinIO URL
+                    local_path = save_path if SAVE_FILES_LOCALLY else None
+                    return local_path, minio_url
                 else:
                     print(f"下载图片失败，状态码: {response.status}, URL: {url}")
-                    return None
+                    return None, None
     except Exception as e:
         print(f"下载图片出错: {str(e)}, URL: {url}")
-        return None
+        return None, None
 
 async def download_task_images(task_result: Dict[str, Any], script_task_id: str = None, base_dir: str = None) -> Dict[str, Any]:
     """
@@ -80,7 +109,8 @@ async def download_task_images(task_result: Dict[str, Any], script_task_id: str 
         "episode": episode_formatted,
         "scenes": {},
         "total_downloaded": 0,
-        "download_errors": 0
+        "download_errors": 0,
+        "minio_uploads": 0  # 添加MinIO上传计数
     }
     
     # 使用脚本任务ID作为目录名
@@ -174,6 +204,7 @@ async def download_task_images(task_result: Dict[str, Any], script_task_id: str 
                 # 处理该提示词下的所有图片
                 image_urls = []
                 local_paths = []
+                minio_urls = []  # 添加MinIO URL列表
                 
                 try:
                     if "final_result" in prompt_data and "data" in prompt_data["final_result"]:
@@ -200,12 +231,17 @@ async def download_task_images(task_result: Dict[str, Any], script_task_id: str 
                                 
                                 print(f"准备下载图片: {save_filename}")
                                 
-                                # 下载图片
-                                downloaded_path = await download_image(url, save_path)
+                                # 下载图片，同时上传到MinIO
+                                local_path, minio_url = await download_image(url, save_path, script_task_id)
                                 
-                                if downloaded_path:
-                                    local_paths.append(downloaded_path)
+                                if local_path:
+                                    local_paths.append(local_path)
                                     download_results["total_downloaded"] += 1
+                                    
+                                    # 如果成功上传到MinIO
+                                    if minio_url:
+                                        minio_urls.append(minio_url)
+                                        download_results["minio_uploads"] += 1
                                 else:
                                     download_results["download_errors"] += 1
                     else:
@@ -222,7 +258,8 @@ async def download_task_images(task_result: Dict[str, Any], script_task_id: str 
                 download_results["scenes"][scene][prompt_idx] = {
                     "prompt": prompt_data.get("prompt", ""),
                     "image_urls": image_urls,
-                    "local_paths": local_paths
+                    "local_paths": local_paths,
+                    "minio_urls": minio_urls  # 添加MinIO URL列表
                 }
         except Exception as e:
             error_msg = f"处理场次 {scene} 时出错: {str(e)}"

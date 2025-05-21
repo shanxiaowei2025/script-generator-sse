@@ -1,18 +1,21 @@
-fastapi==0.110.0
-uvicorn==0.27.1
+fastapi>=0.104.1
+uvicorn>=0.24.0
 jinja2==3.1.2
-python-multipart==0.0.9
+python-multipart>=0.0.6
 httpx==0.27.0
-python-dotenv==1.0.1
+python-dotenv>=1.0.0
 pydantic==2.6.3
-aiofiles==23.2.1
+aiofiles>=23.2.1
 anthropic==0.22.1
-aiohttp==3.9.3
+aiohttp>=3.8.6
 
 # PDF生成相关依赖
-reportlab==4.0.9
-markdown==3.5
-html2text==2024.2.26
-beautifulsoup4==4.12.2
-Pillow==10.2.0
-PyPDF2==3.0.1 
+reportlab>=4.0.7
+markdown>=3.5.1
+html2text>=2020.1.16
+beautifulsoup4>=4.12.2
+Pillow>=10.1.0
+PyPDF2==3.0.1
+tqdm>=4.66.1
+minio>=7.2.0  # MinIO客户端SDK
+requests>=2.31.0 

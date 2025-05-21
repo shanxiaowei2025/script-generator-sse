@@ -181,6 +181,7 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
     严禁更改剧名或分集标题。
     当前生成第{ep}集内容。
     请确保生成完整的剧本。
+    绘画风格为写实风格，不要使用卡通人物。
     """
     
     try:

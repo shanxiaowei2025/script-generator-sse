@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from app.api.stream_router import router as stream_router
-from app.core.config import APP_HOST, APP_PORT, DEBUG, STORAGE_DIR
+from app.core.config import APP_HOST, APP_PORT, DEBUG, STORAGE_DIR, MINIO_ENABLED
 
 # 创建应用目录
 os.makedirs("app/storage/generation_states", exist_ok=True)
@@ -45,11 +45,13 @@ app.add_middleware(
     max_age=600,
 )
 
-# 挂载静态文件服务
-# 提供PDF文件下载
-app.mount("/storage/pdfs", StaticFiles(directory="app/storage/pdfs"), name="pdfs")
-# 提供图片文件访问
-app.mount("/storage/images", StaticFiles(directory="app/storage/images"), name="images")
+# 如果启用了MinIO，则不需要挂载本地静态文件服务
+if not MINIO_ENABLED:
+    # 挂载静态文件服务
+    # 提供PDF文件下载
+    app.mount("/storage/pdfs", StaticFiles(directory="app/storage/pdfs"), name="pdfs")
+    # 提供图片文件访问
+    app.mount("/storage/images", StaticFiles(directory="app/storage/images"), name="images")
 
 # 挂载流式API路由
 app.include_router(stream_router, prefix="/api")
@@ -61,6 +63,14 @@ if __name__ == "__main__":
     os.makedirs("app/storage/partial_contents", exist_ok=True)
     os.makedirs("app/storage/pdfs", exist_ok=True)  # 新增PDF存储目录
     os.makedirs("app/storage/images", exist_ok=True)  # 新增图片存储目录
+    
+    # 初始化MinIO客户端
+    if MINIO_ENABLED:
+        from app.utils.minio_storage import minio_client
+        if minio_client.is_available():
+            print("MinIO存储已成功初始化")
+        else:
+            print("警告: MinIO存储初始化失败，将使用本地存储")
     
     # 启动服务器
     uvicorn.run("app.main:app", host=APP_HOST, port=APP_PORT, reload=DEBUG) 

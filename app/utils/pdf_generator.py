@@ -23,6 +23,8 @@ import tempfile
 import shutil
 import uuid
 
+from app.utils.minio_storage import IMAGE_PREFIX
+
 # 注册中文字体
 try:
     # 尝试注册思源黑体 (Source Han Sans)
@@ -252,12 +254,8 @@ def parse_markdown(text):
             # 截取标题内容
             title_content = text[hash_count:].strip()
             
-            # 检查是否是需要跳过的标题
-            if title_content in ["角色开发表", "短剧分集目录", "角色表", "目录", "角色介绍", "分集目录", "剧集目录"]:
-                print(f"跳过特定Markdown标题: {title_content}")
-                return ""  # 返回空字符串，不显示此标题
-            
-            # 根据#号数量返回对应级别的HTML标题
+            # 修改：不再跳过特定标题
+            # 直接返回对应级别的HTML标题
             return f'<h{hash_count}>{title_content}</h{hash_count}>'
             
     # 预处理粗体和斜体
@@ -305,11 +303,10 @@ def process_markdown_table(html_content):
     tables = []
     
     for table_html in soup.find_all('table'):
-        # 检查表格标题，跳过特定标题
+        # 检查表格标题，保留所有表格包括目录表格
         table_caption = table_html.find('caption')
-        if table_caption and table_caption.get_text().strip() in ["角色开发表", "短剧分集目录", "角色表", "目录", "角色介绍", "分集目录", "剧集目录"]:
-            print(f"跳过特定表格标题: {table_caption.get_text().strip()}")
-            continue
+        if table_caption:
+            print(f"表格标题: {table_caption.get_text().strip()}")
             
         # 获取所有行
         rows = []
@@ -517,10 +514,7 @@ async def generate_script_pdf(
             # 检查是否是"AI短剧生成方案"行
             is_ai_plan_line = "AI短剧生成方案" in line_text or "生成方案" in line_text
             
-            # 检查是否在目录结束和第一集开始之间
-            is_between_directory_and_first_episode = (directory_end_index > 0 and 
-                                                 first_episode_index > 0 and
-                                                 directory_end_index <= i < first_episode_index)
+            # 不再检查和跳过目录与第一集之间的内容，我们希望保留目录内容
             
             # 处理行
             if is_title_line:
@@ -531,12 +525,8 @@ async def generate_script_pdf(
                 # 删除AI方案行
                 print(f"删除AI方案行: {line_text} (行号:{i+1})")
                 # 跳过这一行，不添加
-            elif is_between_directory_and_first_episode:
-                # 删除目录结束和第一集开始之间的内容
-                print(f"删除目录与第一集之间的内容: {line_text} (行号:{i+1})")
-                # 跳过这一行，不添加
             else:
-                # 保留分集目录中的各集标题和其他正常内容
+                # 保留所有内容，包括目录
                 preprocessed_lines.append(line)
         
         # 更新处理后的内容
@@ -934,9 +924,19 @@ async def generate_script_pdf(
                 # 处理二级标题
                 clean_line = line.lstrip('#').strip()
                 
-                # 跳过特定标题行不显示（角色开发表、短剧分集目录等）
+                # 修改特定标题行的处理，不再跳过
                 if clean_line in ["角色开发表", "短剧分集目录", "角色表", "目录", "角色介绍", "分集目录", "剧集目录"]:
-                    print(f"跳过特定标题: {clean_line}")
+                    print(f"保留二级标题: {clean_line}")
+                    elements.append(Paragraph(clean_line, ParagraphStyle(
+                        name='ChineseHeading2',
+                        fontName=font_name,
+                        fontSize=14,
+                        leading=18,
+                        spaceBefore=6,
+                        spaceAfter=3,
+                        textColor=colors.navy,
+                        encoding='utf-8'
+                    )))
                     i += 1
                     continue
                     
@@ -961,9 +961,19 @@ async def generate_script_pdf(
                 # 处理三级标题
                 clean_line = line.lstrip('#').strip()
                 
-                # 跳过特定标题行不显示
+                # 修改特定标题行的处理，不再跳过
                 if clean_line in ["角色开发表", "短剧分集目录", "角色表", "目录", "角色介绍", "分集目录", "剧集目录"]:
-                    print(f"跳过特定标题: {clean_line}")
+                    print(f"保留三级标题: {clean_line}")
+                    elements.append(Paragraph(clean_line, ParagraphStyle(
+                        name='ChineseHeading3',
+                        fontName=font_name,
+                        fontSize=12,
+                        leading=16,
+                        spaceBefore=4,
+                        spaceAfter=2,
+                        textColor=colors.darkblue,
+                        encoding='utf-8'
+                    )))
                     i += 1
                     continue
                     
@@ -1087,8 +1097,16 @@ async def generate_script_pdf(
                         # 尝试获取图片 - 改进的查找逻辑
                         image_paths = []
                         
-                        if image_dir and os.path.exists(image_dir):
-                            # 构建本地图片文件名格式
+                        # 首先检查是否启用了MinIO
+                        from app.core.config import MINIO_ENABLED, SAVE_FILES_LOCALLY
+                        from app.utils.minio_storage import minio_client, get_image_object_name
+                        
+                        # 创建一个集合以避免重复加载相同的图片
+                        processed_image_paths = set()
+                        images_found = False
+                        
+                        if image_dir and (os.path.exists(image_dir) or MINIO_ENABLED):
+                            # 构建图片文件名格式
                             episode_formatted = f"第{current_episode}集"
                             
                             # 规范化场次编号 - 只对第二集特殊处理，如果遇到场次2-1，2-2等需要保留原样
@@ -1138,10 +1156,6 @@ async def generate_script_pdf(
                             # 打印尝试的场次格式
                             print(f"将按优先级尝试以下场次格式查找图片: {', '.join(scene_formats_to_try)}")
                             
-                            # 创建一个集合以避免重复加载相同的图片
-                            processed_image_paths = set()
-                            images_found = False
-                            
                             # 对每种场次格式尝试查找，按优先级排序
                             for scene_fmt in scene_formats_to_try:
                                 # 如果已经找到足够的图片，不再继续查找
@@ -1179,17 +1193,17 @@ async def generate_script_pdf(
                                     has_images_for_current_index = False
                                     
                                     for img_idx in range(4):  # 最多预期4张图片
-                                        # 尝试规范化的场次格式
-                                        local_img_path = os.path.join(
-                                            image_dir, 
-                                            f"{episode_formatted}_{scene_fmt}_{p_idx}_img{img_idx}.png"
-                                        )
+                                        # 生成图片文件名
+                                        img_filename = f"{episode_formatted}_{scene_fmt}_{p_idx}_img{img_idx}.png"
+                                        local_img_path = os.path.join(image_dir, img_filename)
                                         
-                                        if os.path.exists(local_img_path) and local_img_path not in processed_image_paths:
+                                        # 第一步：检查本地文件系统（如果启用了本地保存）
+                                        local_image_found = False
+                                        if SAVE_FILES_LOCALLY and os.path.exists(local_img_path) and local_img_path not in processed_image_paths:
                                             # 压缩图片到临时目录
                                             compressed_img_path = os.path.join(
                                                 temp_dir,
-                                                f"compressed_{episode_formatted}_{scene_fmt}_{p_idx}_img{img_idx}.jpg"
+                                                f"compressed_{img_filename.replace('.png', '.jpg')}"
                                             )
                                             # 进行图片压缩
                                             compressed_img_path = compress_image(
@@ -1203,7 +1217,38 @@ async def generate_script_pdf(
                                             processed_image_paths.add(local_img_path)
                                             temp_image_paths.append(compressed_img_path)
                                             has_images_for_current_index = True
-                                            print(f"找到并压缩图片: {local_img_path} -> {compressed_img_path}")
+                                            local_image_found = True
+                                            print(f"找到并压缩本地图片: {local_img_path} -> {compressed_img_path}")
+                                        
+                                        # 第二步：如果本地没有找到且启用了MinIO，尝试从MinIO下载
+                                        if not local_image_found and MINIO_ENABLED and minio_client.is_available():
+                                            # 构建MinIO对象名
+                                            object_name = get_image_object_name(task_id, img_filename)
+                                            
+                                            # 尝试从MinIO下载图片
+                                            image_data = minio_client.download_bytes(object_name)
+                                            
+                                            if image_data:
+                                                # 将图片数据写入临时文件
+                                                temp_img_path = os.path.join(temp_dir, img_filename)
+                                                with open(temp_img_path, 'wb') as f:
+                                                    f.write(image_data)
+                                                
+                                                # 压缩图片
+                                                compressed_img_path = os.path.join(
+                                                    temp_dir,
+                                                    f"compressed_{img_filename.replace('.png', '.jpg')}"
+                                                )
+                                                compressed_img_path = compress_image(
+                                                    temp_img_path, 
+                                                    compressed_img_path,
+                                                    quality=75,
+                                                    max_size=(1200, 1200)
+                                                )
+                                                
+                                                temp_image_paths.append(compressed_img_path)
+                                                has_images_for_current_index = True
+                                                print(f"从MinIO下载并压缩图片: {object_name} -> {compressed_img_path}")
                                     
                                     # 如果在当前索引下找到了图片，添加到结果列表
                                     if has_images_for_current_index:
@@ -1215,45 +1260,104 @@ async def generate_script_pdf(
                         if not image_paths:
                             print(f"未找到任何精确匹配图片，尝试全局搜索")
                             
+                            # 确保episode_formatted已定义
+                            if 'episode_formatted' not in locals():
+                                if current_episode:
+                                    episode_formatted = f"第{current_episode}集"
+                                else:
+                                    episode_formatted = "未知集数"
+                                print(f"创建默认集数格式: {episode_formatted}")
+                            
                             # 查找任何包含当前集数的图片
                             episode_pattern = episode_formatted
                             
                             # 存储按场景和提示词索引分组的图片
                             grouped_images = {}
                             
-                            # 扫描目录
-                            for filename in os.listdir(image_dir):
-                                if episode_pattern in filename and filename.endswith('.png'):
-                                    try:
-                                        # 提取图片信息
-                                        parts = filename.split('_')
-                                        if len(parts) >= 4:
-                                            img_scene = parts[1]  # 场次
-                                            img_prompt_idx = parts[2]  # 提示词索引
-                                            
-                                            # 使用场景和提示词索引作为分组键
-                                            group_key = f"{img_scene}_{img_prompt_idx}"
-                                            
-                                            if group_key not in grouped_images:
-                                                grouped_images[group_key] = []
+                            # 首先从MinIO搜索图片
+                            if MINIO_ENABLED and minio_client.is_available():
+                                print(f"在MinIO中搜索包含 '{episode_pattern}' 的图片")
+                                
+                                # 列出所有图片对象
+                                image_objects = minio_client.list_objects(f"{IMAGE_PREFIX}{task_id}/")
+                                
+                                for obj in image_objects:
+                                    filename = os.path.basename(obj["name"])
+                                    if episode_pattern in filename and filename.endswith('.png'):
+                                        try:
+                                            # 提取图片信息
+                                            parts = filename.split('_')
+                                            if len(parts) >= 4:
+                                                img_scene = parts[1]  # 场次
+                                                img_prompt_idx = parts[2]  # 提示词索引
                                                 
-                                            # 压缩图片到临时目录
-                                            original_img_path = os.path.join(image_dir, filename)
-                                            compressed_img_path = os.path.join(
-                                                temp_dir,
-                                                f"compressed_{filename.replace('.png', '.jpg')}"
-                                            )
-                                            # 进行图片压缩
-                                            compressed_img_path = compress_image(
-                                                original_img_path, 
-                                                compressed_img_path,
-                                                quality=75,
-                                                max_size=(1200, 1200)
-                                            )
-                                            
-                                            grouped_images[group_key].append(compressed_img_path)
-                                    except Exception as e:
-                                        print(f"解析文件名时出错: {filename}, 错误: {str(e)}")
+                                                # 使用场景和提示词索引作为分组键
+                                                group_key = f"{img_scene}_{img_prompt_idx}"
+                                                
+                                                if group_key not in grouped_images:
+                                                    grouped_images[group_key] = []
+                                                
+                                                # 下载并压缩图片
+                                                image_data = minio_client.download_bytes(obj["name"])
+                                                if image_data:
+                                                    # 将图片数据写入临时文件
+                                                    temp_img_path = os.path.join(temp_dir, filename)
+                                                    with open(temp_img_path, 'wb') as f:
+                                                        f.write(image_data)
+                                                    
+                                                    # 压缩图片
+                                                    compressed_img_path = os.path.join(
+                                                        temp_dir,
+                                                        f"compressed_{filename.replace('.png', '.jpg')}"
+                                                    )
+                                                    compressed_img_path = compress_image(
+                                                        temp_img_path, 
+                                                        compressed_img_path,
+                                                        quality=75,
+                                                        max_size=(1200, 1200)
+                                                    )
+                                                    
+                                                    grouped_images[group_key].append(compressed_img_path)
+                                                    print(f"从MinIO下载并压缩图片组: {group_key} - {filename}")
+                                        except Exception as e:
+                                            print(f"处理MinIO图片时出错: {filename}, 错误: {str(e)}")
+                            
+                            # 然后从本地文件系统搜索（如果启用了本地存储）
+                            if SAVE_FILES_LOCALLY and os.path.exists(image_dir):
+                                # 扫描目录
+                                for filename in os.listdir(image_dir):
+                                    if episode_pattern in filename and filename.endswith('.png'):
+                                        try:
+                                            # 提取图片信息
+                                            parts = filename.split('_')
+                                            if len(parts) >= 4:
+                                                img_scene = parts[1]  # 场次
+                                                img_prompt_idx = parts[2]  # 提示词索引
+                                                
+                                                # 使用场景和提示词索引作为分组键
+                                                group_key = f"{img_scene}_{img_prompt_idx}"
+                                                
+                                                if group_key not in grouped_images:
+                                                    grouped_images[group_key] = []
+                                                    
+                                                # 压缩图片到临时目录
+                                                original_img_path = os.path.join(image_dir, filename)
+                                                compressed_img_path = os.path.join(
+                                                    temp_dir,
+                                                    f"compressed_{filename.replace('.png', '.jpg')}"
+                                                )
+                                                # 进行图片压缩
+                                                compressed_img_path = compress_image(
+                                                    original_img_path, 
+                                                    compressed_img_path,
+                                                    quality=75,
+                                                    max_size=(1200, 1200)
+                                                )
+                                                
+                                                grouped_images[group_key].append(compressed_img_path)
+                                                print(f"找到本地图片组: {group_key} - {filename}")
+                                        except Exception as e:
+                                            print(f"解析文件名时出错: {filename}, 错误: {str(e)}")
                             
                             # 如果找到了分组，按优先级选择
                             if grouped_images:
@@ -1276,8 +1380,8 @@ async def generate_script_pdf(
                                     image_paths = sorted(grouped_images[group_key])[:4]
                                     print(f"使用替代图片组: {group_key}")
                                     
-                            # 限制最多4张图片
-                            image_paths = image_paths[:4]
+                                # 限制最多4张图片
+                                image_paths = image_paths[:4]
                         
                         # 如果成功找到图片，创建一个图片表格，直接放在对应的提示词下方
                         if image_paths:
@@ -1403,7 +1507,9 @@ async def generate_script_pdf(
             elif not line.startswith('#'):  # 排除提示词
                 # 检查是否是角色表或目录标题
                 if line.strip() in ["角色开发表", "短剧分集目录", "角色表", "目录", "角色介绍", "分集目录", "剧集目录"]:
-                    print(f"跳过特定标题文本: {line.strip()}")
+                    # 修改为保留目录标题，不再跳过
+                    print(f"保留目录标题文本: {line.strip()}")
+                    elements.append(Paragraph(line.strip(), styles['ChineseHeading2']))
                     i += 1
                     continue
                     
@@ -1590,182 +1696,87 @@ async def create_script_pdf(
     with_progress: bool = False
 ) -> str:
     """
-    创建剧本PDF文件并保存
+    创建剧本PDF文件
     
     Args:
         task_id: 任务ID
         script_content: 剧本内容
-        image_data: 图片数据字典，格式为 {episode: {scene: {prompt_idx: {...}}}}
+        image_data: 图片数据
         output_dir: 输出目录
-        filename: 自定义文件名（可选）
-        with_progress: 是否记录进度
+        filename: 输出文件名
+        with_progress: 是否启用进度回调
         
     Returns:
-        str: 生成的PDF文件路径
+        str: PDF文件路径或URL
     """
-    # 确保输出目录存在
+    from app.core.config import PDFS_DIR, MINIO_ENABLED, SAVE_FILES_LOCALLY
+    from app.utils.minio_storage import minio_client, get_pdf_object_name
+    
+    # 设置默认输出目录
     if output_dir is None:
-        output_dir = os.path.join("app", "storage", "pdfs")
-        
-    os.makedirs(output_dir, exist_ok=True)
+        output_dir = PDFS_DIR
     
-    # 如果没有提供自定义文件名，则使用默认命名规则
-    if not filename:
-        # 提取剧名，首先尝试从"# 《...》"格式提取
-        title = "未命名剧本"
-        
-        # 尝试从"# 《剧名》"格式提取
-        for line in script_content.split('\n')[:20]:
-            if line.strip().startswith("# 《") and "》" in line:
-                title_match = re.search(r'#\s*《(.+?)》', line)
-                if title_match:
-                    title = title_match.group(1)
-                    break
-        
-        # 如果上面没找到，尝试从第X集标题中提取
-        if title == "未命名剧本":
-            for line in script_content.split('\n')[:50]:
-                ep_match = re.search(r'第\d+集[：:]\s*(.+?)$', line)
-                if ep_match:
-                    title = ep_match.group(1).strip()
-                    break
-                
-        # 如果上面都没找到，尝试传统的剧名格式
-        if title == "未命名剧本":
-            title_match = re.search(r'剧名：《(.+?)》', script_content)
-            if title_match:
-                title = title_match.group(1)
-        
-        # 设置PDF文件名
-        filename = f"{title}_{task_id}.pdf"
+    # 确保目录存在（当需要本地保存时）
+    if SAVE_FILES_LOCALLY:
+        os.makedirs(output_dir, exist_ok=True)
     
-    # 构建完整路径
-    output_path = os.path.join(output_dir, filename)
+    # 设置默认文件名
+    if filename is None:
+        # timestamp = int(time.time())
+        filename = f"{task_id}.pdf"
     
-    # 如果with_progress为True，创建一个状态文件来跟踪进度
-    status_file = None
+    # 创建PDF文档
     if with_progress:
-        status_filename = f"{task_id}_pdf_status.json"
-        status_file = os.path.join(output_dir, status_filename)
-        # 保存初始状态
-        with open(status_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "status": "started",
-                "progress": 0,
-                "message": "正在准备生成PDF...",
-                "timestamp": time.time()
-            }, f, ensure_ascii=False)
-    
-    # 如果文件已经存在，直接返回路径
-    if os.path.exists(output_path):
-        print(f"PDF文件已经存在，直接返回路径: {output_path}")
-        
-        # 更新状态为已完成
-        if with_progress and status_file:
-            with open(status_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "status": "completed",
-                    "progress": 100,
-                    "message": "PDF已存在，无需生成",
-                    "timestamp": time.time(),
-                    "path": output_path,
-                    "filename": filename
-                }, f, ensure_ascii=False)
-                
-        return output_path
-    
-    # 更新进度状态
-    def update_progress(progress: int, message: str):
-        if with_progress and status_file:
-            try:
-                with open(status_file, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        "status": "processing",
-                        "progress": progress,
-                        "message": message,
-                        "timestamp": time.time()
-                    }, f, ensure_ascii=False)
-            except Exception as e:
-                print(f"更新进度状态出错: {str(e)}")
-    
-    # 打印调试信息
-    print(f"准备生成PDF: {output_path}")
-    print(f"任务ID: {task_id}")
-    print(f"剧本长度: {len(script_content)} 字符")
-    print(f"图片数据集数: {len(image_data) if image_data else 0}")
-    
-    # 更新进度
-    update_progress(10, "正在检查图片资源...")
-    
-    # 检查图片目录是否存在
-    image_dir = os.path.join("app", "storage", "images", task_id)
-    if os.path.exists(image_dir):
-        print(f"图片目录存在: {image_dir}")
-        # 列出目录中的图片数量
-        image_files = [f for f in os.listdir(image_dir) if f.endswith('.png')]
-        print(f"图片目录中的图片数量: {len(image_files)}")
-        if len(image_files) > 0:
-            print(f"示例图片: {', '.join(image_files[:3])}")
+        # 定义更新进度的回调函数
+        def update_progress(progress: int, message: str):
+            # 此处可添加进度更新逻辑
+            print(f"PDF生成进度: {progress}% - {message}")
     else:
-        print(f"警告: 图片目录不存在: {image_dir}")
+        update_progress = None
     
-    # 更新进度
-    update_progress(20, "正在生成PDF文档...")
-    
-    # 生成PDF
-    try:
-        # 确保传递task_id参数，用于查找本地图片
-        start_time = time.time()
-        await generate_script_pdf(
-            script_content=script_content,
-            image_data=image_data,
-            output_path=output_path,
-            task_id=task_id,  # 确保传递task_id
-            progress_callback=update_progress  # 使用进度回调函数
+    # 生成PDF文档（如果不保存本地，使用内存方式）
+    full_path = None
+    if SAVE_FILES_LOCALLY:
+        # 完整文件路径
+        full_path = os.path.join(output_dir, filename)
+        pdf_data = await generate_script_pdf(
+            script_content=script_content, 
+            image_data=image_data, 
+            output_path=full_path,
+            task_id=task_id,
+            progress_callback=update_progress
         )
-        elapsed = time.time() - start_time
-        print(f"PDF生成成功: {output_path}，耗时: {elapsed:.2f}秒")
+    else:
+        # 生成PDF数据（不写入文件）
+        pdf_data = await generate_script_pdf(
+            script_content=script_content, 
+            image_data=image_data, 
+            output_path=None,  # 不指定输出路径，直接返回PDF数据
+            task_id=task_id,
+            progress_callback=update_progress
+        )
+    
+    # 如果启用了MinIO，上传到MinIO并获取URL
+    if MINIO_ENABLED and minio_client.is_available():
+        # 定义在MinIO中的对象名
+        object_name = get_pdf_object_name(task_id, filename)
         
-        # 更新为完成状态
-        if with_progress and status_file:
-            with open(status_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "status": "completed",
-                    "progress": 100,
-                    "message": f"PDF生成完成，耗时: {elapsed:.2f}秒",
-                    "timestamp": time.time(),
-                    "path": output_path,
-                    "filename": filename
-                }, f, ensure_ascii=False)
+        # 将PDF上传到MinIO
+        if SAVE_FILES_LOCALLY and full_path:
+            # 如果本地保存了文件，上传本地文件
+            success, url = minio_client.upload_file(full_path, object_name, 'application/pdf')
+        else:
+            # 直接上传PDF数据
+            success, url = minio_client.upload_bytes(pdf_data, object_name, 'application/pdf')
         
-        return output_path
-    except Exception as e:
-        print(f"PDF生成失败: {str(e)}")
-        # 记录更详细的错误信息
-        import traceback
-        error_details = traceback.format_exc()
-        print(error_details)
-        
-        # 更新为错误状态
-        if with_progress and status_file:
-            with open(status_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "status": "error",
-                    "progress": 0,
-                    "message": f"PDF生成失败: {str(e)}",
-                    "error_details": error_details,
-                    "timestamp": time.time()
-                }, f, ensure_ascii=False)
-        
-        raise
-    finally:
-        # 如果生成失败且生成了部分文件，清理它
-        if 'e' in locals() and os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-                print(f"已删除部分生成的PDF文件: {output_path}")
-            except Exception as cleanup_error:
-                print(f"清理部分生成的PDF文件失败: {str(cleanup_error)}")
+        if success:
+            print(f"PDF已上传到MinIO: {object_name}")
+            return url
+        else:
+            print(f"上传PDF到MinIO失败: {url}")
+    
+    # 默认返回本地文件路径（如果有保存）或None
+    return full_path if SAVE_FILES_LOCALLY else None
 
 # 添加一个新函数，用于从generation_states文件夹读取剧本并生成PDF
 async def generate_pdf_from_script_file(
@@ -1775,35 +1786,41 @@ async def generate_pdf_from_script_file(
     with_progress: bool = False
 ) -> str:
     """
-    从脚本文件生成PDF报告
+    从脚本文件生成PDF
     
     Args:
-        script_file_path: 剧本文件路径 (.pkl)
+        script_file_path: 脚本文件路径(.pkl文件)
         output_dir: 输出目录
-        filename: 文件名
-        with_progress: 是否显示进度
+        filename: 输出文件名
+        with_progress: 是否启用进度回调
         
     Returns:
-        str: PDF文件路径
+        str: PDF文件路径或URL
     """
-    # 1. 从路径中提取task_id
-    task_id = os.path.basename(script_file_path).split('.')[0]
-    
-    # 2. 加载剧本内容
-    script_content, current_episode = load_script_from_pkl(script_file_path)
-    
-    # 3. 创建空的image_data字典
-    image_data = {}
-    
-    # 4. 调用create_script_pdf生成PDF
-    return await create_script_pdf(
-        task_id=task_id,
-        script_content=script_content,
-        image_data=image_data,
-        output_dir=output_dir,
-        filename=filename,
-        with_progress=with_progress
-    ) 
+    try:
+        # 加载脚本内容
+        script_content, _ = load_script_from_pkl(script_file_path)
+        
+        # 从文件路径中提取任务ID
+        task_id = os.path.basename(script_file_path).split('.')[0]
+        
+        # 创建空图片数据，暂不包含图片
+        image_data = {}
+        
+        # 生成PDF
+        pdf_path = await create_script_pdf(
+            task_id=task_id,
+            script_content=script_content,
+            image_data=image_data,
+            output_dir=output_dir,
+            filename=filename,
+            with_progress=with_progress
+        )
+        
+        return pdf_path
+    except Exception as e:
+        print(f"生成PDF失败: {str(e)}")
+        raise
 
 # 添加图片压缩函数
 def compress_image(input_path, output_path, quality=70, max_size=(1024, 1024)):
