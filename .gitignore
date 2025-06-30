@@ -46,3 +46,46 @@ env/
 # 操作系统
 .DS_Store
 Thumbs.db
+
+# 数据库文件
+*.db
+*.sqlite
+*.sqlite3
+
+# 测试覆盖率报告
+.coverage
+htmlcov/
+.pytest_cache/
+
+# 日志目录
+logs/
+
+# 证书和密钥
+*.pem
+*.key
+*.crt
+*.cer
+
+# 媒体和大文件
+*.mp4
+*.mp3
+*.zip
+*.rar
+*.7z
+
+# Jupyter相关
+.ipynb_checkpoints/
+*.ipynb
+
+# 静态生成文件
+app/static/generated/
+
+# 本地配置文件
+local_settings.py
+config.local.json
+*.local.yaml
+*.local.yml
+
+# 缓存
+.cache/
+.mypy_cache/

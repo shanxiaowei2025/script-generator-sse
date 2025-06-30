@@ -218,7 +218,7 @@ def save_partial_content(task_id, episode, content):
             if minio_client.is_available():
                 # 上传内容文件
                 object_name = get_content_object_name(task_id, episode)
-                success, url = minio_client.upload_text(content, object_name, 'text/plain')
+                success, url = minio_client.upload_text(content, object_name, 'text/plain; charset=utf-8')
                 
                 if success:
                     print(f"已将部分内容上传到MinIO: {object_name}")
@@ -228,7 +228,7 @@ def save_partial_content(task_id, episode, content):
                     meta_success, _ = minio_client.upload_text(
                         json.dumps(meta, ensure_ascii=False), 
                         meta_object, 
-                        'application/json'
+                        'application/json; charset=utf-8'
                     )
                     
                     if not meta_success:

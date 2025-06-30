@@ -47,8 +47,7 @@ os.makedirs(IMAGES_DIR, exist_ok=True)  # 确保图片目录存在
 
 # 令牌限制
 DIRECTORY_TOKEN_LIMIT = 5000 # 目录生成限制
-EPISODE_TOKEN_LIMIT = 30000 # 单集生成限制
-RESUME_TOKEN_LIMIT = 20000 # 续写生成限制
+EPISODE_TOKEN_LIMIT = 10000 # 单集生成限制
 
 # 请求超时(秒)
 REQUEST_TIMEOUT = 600

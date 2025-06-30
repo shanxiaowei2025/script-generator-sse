@@ -190,7 +190,7 @@ async def wait_for_task_completion(task_id: str, callback=None, request_id=None)
         
         # 方法2: 检查请求ID是否被标记为已取消
         if not is_cancelled and request_id:
-            from app.api.stream_router import global_runninghub_tasks
+            from app.services.task_queue import global_runninghub_tasks
             if request_id in global_runninghub_tasks and "CANCELLED_REQUEST" in global_runninghub_tasks[request_id]:
                 is_cancelled = True
                 cancel_reason = "请求已被整体取消"

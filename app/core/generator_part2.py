@@ -2,7 +2,7 @@ import json
 import httpx
 import asyncio
 from app.core.config import MODEL_NAME, API_VERSION, REQUEST_TIMEOUT
-from app.core.config import EPISODE_TOKEN_LIMIT, RESUME_TOKEN_LIMIT
+from app.core.config import EPISODE_TOKEN_LIMIT
 from app.utils.text_utils import extract_title_and_directory
 from app.utils.storage import save_partial_content
 from typing import Optional, Callable, Awaitable

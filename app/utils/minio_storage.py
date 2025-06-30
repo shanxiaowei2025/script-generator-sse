@@ -160,14 +160,14 @@ class MinioClient:
             print(f"上传数据失败 {object_name}: {str(e)}")
             return False, str(e)
     
-    def upload_text(self, text: str, object_name: str, content_type: str = 'text/plain') -> Tuple[bool, str]:
+    def upload_text(self, text: str, object_name: str, content_type: str = 'text/plain; charset=utf-8') -> Tuple[bool, str]:
         """
         上传文本数据到MinIO
         
         Args:
             text: 文本内容
             object_name: MinIO中的对象名
-            content_type: 内容类型，默认为text/plain
+            content_type: 内容类型，默认为text/plain; charset=utf-8
             
         Returns:
             Tuple[bool, str]: (是否成功, 对象URL或错误信息)

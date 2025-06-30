@@ -234,14 +234,23 @@ async def download_task_images(task_result: Dict[str, Any], script_task_id: str 
                                 # 下载图片，同时上传到MinIO
                                 local_path, minio_url = await download_image(url, save_path, script_task_id)
                                 
-                                if local_path:
+                                # 修复：判断下载是否成功应该基于下载操作的结果，而不仅仅是local_path
+                                download_success = False
+                                
+                                # 如果启用本地保存并且本地路径存在，说明下载成功
+                                if SAVE_FILES_LOCALLY and local_path:
                                     local_paths.append(local_path)
+                                    download_success = True
+                                
+                                # 如果成功上传到MinIO，也说明下载成功
+                                if minio_url:
+                                    minio_urls.append(minio_url)
+                                    download_results["minio_uploads"] += 1
+                                    download_success = True
+                                
+                                # 更新下载计数
+                                if download_success:
                                     download_results["total_downloaded"] += 1
-                                    
-                                    # 如果成功上传到MinIO
-                                    if minio_url:
-                                        minio_urls.append(minio_url)
-                                        download_results["minio_uploads"] += 1
                                 else:
                                     download_results["download_errors"] += 1
                     else:

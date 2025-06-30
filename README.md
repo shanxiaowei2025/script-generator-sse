@@ -1,6 +1,6 @@
 # 剧本生成器 SSE API
 
-基于Claude-3-7-Sonnet的AI剧本生成服务，采用Server-Sent Events (SSE)流式响应技术，可以生成完整的短剧剧本，包括角色表、分集目录和详细剧情。支持实时提取画面描述词并调用RunningHub API。
+基于Claude-3-7-Sonnet的AI剧本生成服务，采用Server-Sent Events (SSE)流式响应技术，可以生成完整的短剧剧本，包括角色表、分集目录和详细剧情。支持实时提取画面描述词并调用RunningHub API，集成MinIO对象存储。
 
 ## 特性
 
@@ -9,20 +9,51 @@
 - 可取消正在进行的生成任务
 - 支持实时提取剧本中的画面描述词
 - 集成RunningHub工作流API，自动处理提示词
+- 自动图片下载和MinIO对象存储
+- PDF剧本生成和导出功能
 - 高质量的剧本生成效果
-- 简洁直观的用户界面
+- 模块化架构设计
 
 ## 项目结构
 
 ```
 app/
-├── api/             # API路由和控制器
-├── core/            # 核心功能和配置
-├── models/          # 数据模型和Schema
-├── storage/         # 存储目录
+├── api/                    # API路由和控制器
+│   ├── stream_router.py   # 流式API路由
+│   ├── models.py          # API数据模型
+│   └── __init__.py
+├── core/                   # 核心功能和配置
+│   ├── config.py          # 应用配置
+│   ├── generator.py       # 核心生成器
+│   ├── generator_part2.py # 生成器扩展
+│   ├── init.py           # 初始化模块
+│   └── __init__.py
+├── models/                 # 数据模型和Schema
+│   ├── schema.py          # 数据结构定义
+│   └── __init__.py
+├── services/               # 业务服务模块
+│   ├── script_generation.py  # 剧本生成服务
+│   ├── scene_prompts.py      # 场景提示词服务
+│   ├── runninghub.py         # RunningHub集成服务
+│   ├── image_processing.py   # 图片处理服务
+│   ├── pdf_generation.py     # PDF生成服务
+│   ├── task_queue.py         # 任务队列管理
+│   └── __init__.py
+├── storage/                # 存储目录
 │   ├── generation_states/  # 生成状态存储
-│   └── partial_contents/   # 部分内容存储
-└── utils/           # 工具函数
+│   ├── partial_contents/   # 部分内容存储
+│   ├── pdfs/              # PDF文件存储
+│   └── images/            # 图片文件存储
+├── utils/                  # 工具函数
+│   ├── storage.py         # 存储工具
+│   ├── minio_storage.py   # MinIO存储客户端
+│   ├── image_downloader.py # 图片下载工具
+│   ├── runninghub_api.py  # RunningHub API客户端
+│   ├── text_utils.py      # 文本处理工具
+│   ├── pdf_generator.py   # PDF生成工具
+│   └── __init__.py
+├── static/                 # 静态文件
+└── main.py                # 应用入口点
 ```
 
 ## 安装和运行
@@ -65,11 +96,24 @@ RUNNINGHUB_RESULT_API_URL=https://www.runninghub.cn/task/openapi/queryResult
 RUNNINGHUB_API_KEY=your_runninghub_api_key
 RUNNINGHUB_WORKFLOW_ID=your_workflow_id
 RUNNINGHUB_NODE_ID=your_node_id
+
+# MinIO对象存储配置
+MINIO_ENABLED=true
+MINIO_URL=localhost:9000
+MINIO_ACCESS_KEY=your_access_key
+MINIO_SECRET_KEY=your_secret_key
+MINIO_BUCKET=script-generator
+MINIO_SECURE=false
+
+# 文件存储配置
+SAVE_FILES_LOCALLY=false
 ```
 
 4. 运行服务
 
 ```bash
+source venv/bin/activate 
+
 uvicorn app.main:app --host=0.0.0.0 --port=8003 --reload
 
 # 或

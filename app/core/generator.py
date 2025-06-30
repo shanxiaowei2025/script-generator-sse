@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from app.core.config import (
     MODEL_NAME, API_VERSION, REQUEST_TIMEOUT,
-    DIRECTORY_TOKEN_LIMIT, EPISODE_TOKEN_LIMIT, RESUME_TOKEN_LIMIT,
+    DIRECTORY_TOKEN_LIMIT, EPISODE_TOKEN_LIMIT,
     GENERATION_STATES_DIR, 
     PARTIAL_CONTENTS_DIR,
     MINIO_ENABLED,
@@ -20,9 +20,8 @@ from app.utils.text_utils import extract_title_and_directory
 from app.utils.storage import save_partial_content
 from app.utils.minio_storage import minio_client, get_state_object_name, get_content_object_name
 
-# 导入从generator_part2.py和generator_part3.py
+# 导入从generator_part2.py
 from app.core.generator_part2 import generate_episode
-from app.core.generator_part3 import resume_episode_generation
 
 async def generate_character_and_directory(
     genre, 
