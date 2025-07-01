@@ -1716,14 +1716,16 @@ async def create_script_pdf(
     if output_dir is None:
         output_dir = PDFS_DIR
     
-    # 确保目录存在（当需要本地保存时）
-    if SAVE_FILES_LOCALLY:
-        os.makedirs(output_dir, exist_ok=True)
+    # 确保目录存在
+    os.makedirs(output_dir, exist_ok=True)
     
     # 设置默认文件名
     if filename is None:
         # timestamp = int(time.time())
         filename = f"{task_id}.pdf"
+    
+    # 完整文件路径
+    full_path = os.path.join(output_dir, filename)
     
     # 创建PDF文档
     if with_progress:
@@ -1734,27 +1736,23 @@ async def create_script_pdf(
     else:
         update_progress = None
     
-    # 生成PDF文档（如果不保存本地，使用内存方式）
-    full_path = None
-    if SAVE_FILES_LOCALLY:
-        # 完整文件路径
-        full_path = os.path.join(output_dir, filename)
-        pdf_data = await generate_script_pdf(
-            script_content=script_content, 
-            image_data=image_data, 
-            output_path=full_path,
-            task_id=task_id,
-            progress_callback=update_progress
-        )
-    else:
-        # 生成PDF数据（不写入文件）
-        pdf_data = await generate_script_pdf(
-            script_content=script_content, 
-            image_data=image_data, 
-            output_path=None,  # 不指定输出路径，直接返回PDF数据
-            task_id=task_id,
-            progress_callback=update_progress
-        )
+    # 生成PDF文档
+    pdf_data = await generate_script_pdf(
+        script_content=script_content, 
+        image_data=image_data, 
+        output_path=full_path if SAVE_FILES_LOCALLY else None,
+        task_id=task_id,
+        progress_callback=update_progress
+    )
+    
+    # 如果不保存本地但生成了PDF数据，确保写入文件以防MinIO上传失败
+    if not SAVE_FILES_LOCALLY and pdf_data:
+        try:
+            with open(full_path, 'wb') as f:
+                f.write(pdf_data)
+            print(f"PDF数据已保存到本地文件作为备份: {full_path}")
+        except Exception as e:
+            print(f"保存PDF数据到本地备份文件失败: {str(e)}")
     
     # 如果启用了MinIO，上传到MinIO并获取URL
     if MINIO_ENABLED and minio_client.is_available():
@@ -1762,8 +1760,8 @@ async def create_script_pdf(
         object_name = get_pdf_object_name(task_id, filename)
         
         # 将PDF上传到MinIO
-        if SAVE_FILES_LOCALLY and full_path:
-            # 如果本地保存了文件，上传本地文件
+        if SAVE_FILES_LOCALLY or os.path.exists(full_path):
+            # 上传本地文件
             success, url = minio_client.upload_file(full_path, object_name, 'application/pdf')
         else:
             # 直接上传PDF数据
@@ -1775,8 +1773,8 @@ async def create_script_pdf(
         else:
             print(f"上传PDF到MinIO失败: {url}")
     
-    # 默认返回本地文件路径（如果有保存）或None
-    return full_path if SAVE_FILES_LOCALLY else None
+    # 返回本地文件路径
+    return full_path
 
 # 添加一个新函数，用于从generation_states文件夹读取剧本并生成PDF
 async def generate_pdf_from_script_file(

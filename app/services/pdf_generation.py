@@ -164,6 +164,16 @@ async def generate_script_pdf_path_service(task_id: str, timeout: int = 60) -> J
             
             print(f"PDF生成成功，文件路径: {pdf_path}")
             
+            # 检查pdf_path是否为None
+            if pdf_path is None:
+                return JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={
+                        "status": "error", 
+                        "message": "PDF生成失败：无法获取有效的文件路径"
+                    }
+                )
+            
             # 从路径中提取文件名
             filename = os.path.basename(pdf_path)
             
