@@ -45,7 +45,7 @@ async def call_runninghub_workflow(prompt: str) -> Dict[str, Any]:
         "nodeInfoList": [
             {
                 "nodeId": RUNNINGHUB_NODE_ID,
-                "fieldName": "text",
+                "fieldName": "prompt",
                 "fieldValue": prompt
             }
         ]

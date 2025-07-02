@@ -1736,45 +1736,65 @@ async def create_script_pdf(
     else:
         update_progress = None
     
-    # 生成PDF文档
-    pdf_data = await generate_script_pdf(
-        script_content=script_content, 
-        image_data=image_data, 
-        output_path=full_path if SAVE_FILES_LOCALLY else None,
-        task_id=task_id,
-        progress_callback=update_progress
-    )
+    # 初始化pdf_data为None，避免未赋值就引用
+    pdf_data = None
+    minio_upload_success = False
     
-    # 如果不保存本地但生成了PDF数据，确保写入文件以防MinIO上传失败
-    if not SAVE_FILES_LOCALLY and pdf_data:
+    try:
+        # 尝试生成PDF文档
+        pdf_data = await generate_script_pdf(
+            script_content=script_content, 
+            image_data=image_data, 
+            output_path=full_path if SAVE_FILES_LOCALLY else None,
+            task_id=task_id,
+            progress_callback=update_progress
+        )
+    except Exception as e:
+        print(f"生成PDF时发生错误: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        
+    # 如果没有保存到本地但生成了PDF数据，先不保存，等待MinIO上传结果
+    local_saved = SAVE_FILES_LOCALLY and os.path.exists(full_path)
+    
+    # 如果启用了MinIO，尝试上传到MinIO并获取URL
+    minio_url = None
+    if MINIO_ENABLED and minio_client.is_available() and (local_saved or pdf_data):
+        try:
+            # 定义在MinIO中的对象名
+            object_name = get_pdf_object_name(task_id, filename)
+            
+            # 将PDF上传到MinIO
+            if local_saved:
+                # 上传本地文件
+                success, url = minio_client.upload_file(full_path, object_name, 'application/pdf')
+            elif pdf_data:
+                # 直接上传PDF数据
+                success, url = minio_client.upload_bytes(pdf_data, object_name, 'application/pdf')
+            else:
+                success, url = False, None
+            
+            if success:
+                print(f"PDF已上传到MinIO: {object_name}")
+                minio_upload_success = True
+                minio_url = url
+            else:
+                print(f"上传PDF到MinIO失败: {url}")
+        except Exception as e:
+            print(f"上传PDF到MinIO过程中出错: {str(e)}")
+            
+    # MinIO上传失败且未保存到本地，但有PDF数据，确保保存到本地
+    if not minio_upload_success and not local_saved and pdf_data:
         try:
             with open(full_path, 'wb') as f:
                 f.write(pdf_data)
-            print(f"PDF数据已保存到本地文件作为备份: {full_path}")
+            print(f"MinIO上传失败，PDF数据已保存到本地文件: {full_path}")
+            local_saved = True
         except Exception as e:
             print(f"保存PDF数据到本地备份文件失败: {str(e)}")
     
-    # 如果启用了MinIO，上传到MinIO并获取URL
-    if MINIO_ENABLED and minio_client.is_available():
-        # 定义在MinIO中的对象名
-        object_name = get_pdf_object_name(task_id, filename)
-        
-        # 将PDF上传到MinIO
-        if SAVE_FILES_LOCALLY or os.path.exists(full_path):
-            # 上传本地文件
-            success, url = minio_client.upload_file(full_path, object_name, 'application/pdf')
-        else:
-            # 直接上传PDF数据
-            success, url = minio_client.upload_bytes(pdf_data, object_name, 'application/pdf')
-        
-        if success:
-            print(f"PDF已上传到MinIO: {object_name}")
-            return url
-        else:
-            print(f"上传PDF到MinIO失败: {url}")
-    
-    # 返回本地文件路径
-    return full_path
+    # 如果MinIO上传成功，返回MinIO URL，否则返回本地路径
+    return minio_url if minio_upload_success else full_path
 
 # 添加一个新函数，用于从generation_states文件夹读取剧本并生成PDF
 async def generate_pdf_from_script_file(
