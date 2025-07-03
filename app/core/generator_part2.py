@@ -127,21 +127,21 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
 
     △<场景详细描述，描述环境、氛围或关键动作，请详细描述>
 
-    #<根据以上场景详细描述，描述环境、氛围或关键动作生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     <角色1>
     (<语气或动作>)
     <角色1的台词内容。>
 
     △<动作或环境变化，请详细描述>
-    #<根据以上动作或环境变化生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     <角色2>
     (<语气或动作>)
     <角色2的台词内容。>
 
     △<其他角色的动作，或场景补充描述，请详细描述>
-    #<根据其他角色的动作，或场景补充描述生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     ...
 
@@ -151,14 +151,14 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
 
     △<场景详细描述，描述环境、氛围或关键动作，请详细描述>
 
-    #<根据以上场景详细描述，描述环境、氛围或关键动作生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     <角色n>
     (<语气或动作>)
     <角色n的台词内容>
 
     △<动作或环境变化，请详细描述>
-    #<根据以上动作或环境变化生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     <角色n+1>
     (<语气或动作>)
@@ -166,7 +166,7 @@ async def generate_episode(ep, genre, episodes, duration, full_script, API_KEY, 
 
     △<其他角色的动作，或场景补充描述，请详细描述>
 
-    #<根据其他角色的动作，或场景补充描述生成个画面提示词，要求按照以下描述结构生成这个画面的提示词：所有角色在画面中的描述，场景设定，色调与光影，风格关键词与氛围。每个画面提示词要连贯为一个段落，且逻辑通顺有条理，不要出现抽象词语，不要分点陈述，能够直接通过画面描述提示词通过Ai绘画软件生成对应的图>
+    #<Based on the detailed scene description above, generate an image prompt describing the environment, atmosphere, or key actions. Structure the prompt to include: descriptions of all characters in the scene, scene setting, color tone and lighting, style keywords and mood. Each image prompt should flow as a cohesive paragraph with logical and orderly content. Avoid abstract terms and bulleted descriptions. The prompt should be directly usable in AI drawing software to generate the corresponding image>
 
     (完)
     
